@@ -1,9 +1,11 @@
 use std::path::Path;
 use std::sync::Arc;
 
+use md5::{Digest, Md5};
 use walkdir::WalkDir;
 
 use crate::error::AppError;
+use crate::progress::ProgressReporter;
 
 // ---------------------------------------------------------------------------
 // Summary types
@@ -11,11 +13,13 @@ use crate::error::AppError;
 
 pub struct PushSummary {
     pub files_uploaded: usize,
+    pub files_skipped: usize,
     pub total_bytes: u64,
 }
 
 pub struct PullSummary {
     pub files_downloaded: usize,
+    pub files_skipped: usize,
     pub total_bytes: u64,
 }
 
@@ -34,13 +38,16 @@ impl SyncEngine {
 
     /// Upload all files in `local_dir` to R2 under `projects/<project>/`.
     ///
-    /// Phase 1: unconditional — every file is uploaded regardless of whether
-    /// an identical copy already exists in R2. ETag-based skipping is added
-    /// in Phase 3.
+    /// Files whose local MD5 matches the R2 object's stored digest are skipped.
+    /// The comparison uses the `x-amz-meta-content-md5` custom metadata field
+    /// when present (reliable for both single-part and multipart uploads),
+    /// falling back to the raw ETag for single-part objects.
     ///
     /// Does NOT delete any R2 objects — see TDD section 7 "Deletion Semantics".
     pub async fn push(&self, project: &str, local_dir: &Path) -> Result<PushSummary, AppError> {
+        let reporter = ProgressReporter::new();
         let mut files_uploaded: usize = 0;
+        let mut files_skipped: usize = 0;
         let mut total_bytes: u64 = 0;
 
         for entry_result in WalkDir::new(local_dir) {
@@ -84,21 +91,27 @@ impl SyncEngine {
 
             let r2_key = format!("projects/{}/{}", project, relative_path_str);
 
+            // Read file once; compute MD5 from the buffer to avoid a second read.
             let bytes = std::fs::read(abs_path).map_err(|e| AppError::IoError {
                 path: relative_path_str.clone(),
                 source: e,
             })?;
+            let local_md5 = md5_hex(&bytes);
+
+            if let Ok(Some(meta)) = self.r2.head_object(&r2_key).await
+                && etags_match(&local_md5, &meta)
+            {
+                files_skipped += 1;
+                continue;
+            }
 
             let byte_count = bytes.len() as u64;
-            let size_str = format_bytes(byte_count);
-
-            println!("  Uploading {:<40} ({})", relative_path_str, size_str);
+            let bar = reporter.add_file_bar(&relative_path_str, byte_count);
 
             self.r2
                 .put_object(&r2_key, bytes)
                 .await
                 .map_err(|e| match e {
-                    // Re-wrap with the relative path for a clearer error message.
                     AppError::UploadFailed { source, .. } => AppError::UploadFailed {
                         path: relative_path_str.clone(),
                         source,
@@ -106,27 +119,33 @@ impl SyncEngine {
                     other => other,
                 })?;
 
+            bar.update(byte_count);
+            bar.finish(&relative_path_str, byte_count);
+
             files_uploaded += 1;
             total_bytes += byte_count;
         }
 
         println!(
-            "Push complete: {} files, {} uploaded.",
+            "Push complete: {} uploaded, {} unchanged, {} transferred.",
             files_uploaded,
+            files_skipped,
             format_bytes(total_bytes)
         );
 
         Ok(PushSummary {
             files_uploaded,
+            files_skipped,
             total_bytes,
         })
     }
 
     /// Download all R2 objects under `projects/<project>/` to `local_dir`.
     ///
-    /// Phase 1: unconditional — every object is downloaded regardless of
-    /// whether an identical local copy already exists. ETag-based skipping
-    /// is added in Phase 3.
+    /// Files whose local MD5 matches the R2 ETag (or `x-amz-meta-content-md5`
+    /// when available) are skipped. For multipart-uploaded objects where the
+    /// ETag is a composite digest and no custom MD5 metadata is present, the
+    /// file is always downloaded (conservative — no false skips).
     ///
     /// Returns `AppError::R2Error` if the project prefix is empty (not found).
     pub async fn pull(&self, project: &str, local_dir: &Path) -> Result<PullSummary, AppError> {
@@ -140,12 +159,29 @@ impl SyncEngine {
             )));
         }
 
+        let reporter = ProgressReporter::new();
         let mut files_downloaded: usize = 0;
+        let mut files_skipped: usize = 0;
         let mut total_bytes: u64 = 0;
 
         for obj in &objects {
             // object.key is relative (prefix already stripped in r2.rs).
             let local_path = local_dir.join(&obj.key);
+
+            // Skip unchanged files: if local copy exists and MD5 matches.
+            if local_path.exists()
+                && let Ok(local_md5) = compute_local_etag(&local_path)
+            {
+                let meta = crate::r2::R2ObjectMeta {
+                    etag: obj.etag.clone(),
+                    size: obj.size,
+                    content_md5: obj.content_md5.clone(),
+                };
+                if etags_match(&local_md5, &meta) {
+                    files_skipped += 1;
+                    continue;
+                }
+            }
 
             // Ensure parent directories exist.
             if let Some(parent) = local_path.parent() {
@@ -155,8 +191,7 @@ impl SyncEngine {
                 })?;
             }
 
-            let size_str = format_bytes(obj.size);
-            println!("  Downloading {:<40} ({})", obj.key, size_str);
+            let bar = reporter.add_file_bar(&obj.key, obj.size);
 
             // Full R2 key = prefix + relative key.
             let full_key = format!("{}{}", prefix, obj.key);
@@ -179,18 +214,23 @@ impl SyncEngine {
                 source: e,
             })?;
 
+            bar.update(byte_count);
+            bar.finish(&obj.key, byte_count);
+
             files_downloaded += 1;
             total_bytes += byte_count;
         }
 
         println!(
-            "Pull complete: {} files, {} downloaded.",
+            "Pull complete: {} downloaded, {} unchanged, {} transferred.",
             files_downloaded,
+            files_skipped,
             format_bytes(total_bytes)
         );
 
         Ok(PullSummary {
             files_downloaded,
+            files_skipped,
             total_bytes,
         })
     }
@@ -200,7 +240,37 @@ impl SyncEngine {
 // Private helpers
 // ---------------------------------------------------------------------------
 
-fn format_bytes(bytes: u64) -> String {
+/// Compute the MD5 hex digest of a byte slice.
+fn md5_hex(data: &[u8]) -> String {
+    let mut hasher = Md5::new();
+    hasher.update(data);
+    format!("{:x}", hasher.finalize())
+}
+
+/// Compute the MD5 hex digest of a local file.
+fn compute_local_etag(path: &Path) -> Result<String, std::io::Error> {
+    Ok(md5_hex(&std::fs::read(path)?))
+}
+
+/// Compare a local MD5 hex digest against R2 object metadata.
+///
+/// Preference order:
+/// 1. `content_md5` custom metadata (reliable for single-part and multipart).
+/// 2. Raw ETag — but only for single-part uploads (no `-` in the ETag).
+///
+/// Returns `true` when the file is identical and can be skipped.
+fn etags_match(local_md5: &str, r2_meta: &crate::r2::R2ObjectMeta) -> bool {
+    if let Some(ref remote_md5) = r2_meta.content_md5 {
+        return local_md5 == remote_md5.as_str();
+    }
+    // Multipart ETags contain a dash (e.g. "abc123-2"); cannot compare directly.
+    if r2_meta.etag.contains('-') {
+        return false;
+    }
+    local_md5 == r2_meta.etag.as_str()
+}
+
+pub fn format_bytes(bytes: u64) -> String {
     if bytes < 1024 {
         format!("{} B", bytes)
     } else if bytes < 1024 * 1024 {
@@ -219,6 +289,7 @@ fn format_bytes(bytes: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::r2::R2ObjectMeta;
 
     #[test]
     fn format_bytes_ranges() {
@@ -233,9 +304,11 @@ mod tests {
     fn push_summary_accumulates_correctly() {
         let s = PushSummary {
             files_uploaded: 3,
+            files_skipped: 2,
             total_bytes: 1024,
         };
         assert_eq!(s.files_uploaded, 3);
+        assert_eq!(s.files_skipped, 2);
         assert_eq!(s.total_bytes, 1024);
     }
 
@@ -243,9 +316,67 @@ mod tests {
     fn pull_summary_has_correct_fields() {
         let s = PullSummary {
             files_downloaded: 5,
+            files_skipped: 1,
             total_bytes: 2048,
         };
         assert_eq!(s.files_downloaded, 5);
+        assert_eq!(s.files_skipped, 1);
         assert_eq!(s.total_bytes, 2048);
+    }
+
+    #[test]
+    fn compute_local_etag_known_value() {
+        // MD5("hello\n") — write a known file and check the digest.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.txt");
+        std::fs::write(&path, b"hello").unwrap();
+        // MD5("hello") == 5d41402abc4b2a76b9719d911017c592
+        assert_eq!(
+            compute_local_etag(&path).unwrap(),
+            "5d41402abc4b2a76b9719d911017c592"
+        );
+    }
+
+    #[test]
+    fn etags_match_uses_content_md5_first() {
+        let meta = R2ObjectMeta {
+            etag: "different-etag".to_string(),
+            size: 5,
+            content_md5: Some("5d41402abc4b2a76b9719d911017c592".to_string()),
+        };
+        // content_md5 matches local_md5 — should skip even though etag differs.
+        assert!(etags_match("5d41402abc4b2a76b9719d911017c592", &meta));
+    }
+
+    #[test]
+    fn etags_match_falls_back_to_etag_for_single_part() {
+        let meta = R2ObjectMeta {
+            etag: "5d41402abc4b2a76b9719d911017c592".to_string(),
+            size: 5,
+            content_md5: None,
+        };
+        assert!(etags_match("5d41402abc4b2a76b9719d911017c592", &meta));
+    }
+
+    #[test]
+    fn etags_match_returns_false_for_multipart_without_content_md5() {
+        // Multipart ETags contain a dash — comparison is not possible without content_md5.
+        let meta = R2ObjectMeta {
+            etag: "abc123-2".to_string(),
+            size: 10_000_000,
+            content_md5: None,
+        };
+        // Even if local_md5 happens to equal the base of the etag, we must not skip.
+        assert!(!etags_match("abc123", &meta));
+    }
+
+    #[test]
+    fn etags_match_returns_false_on_mismatch() {
+        let meta = R2ObjectMeta {
+            etag: "abc123".to_string(),
+            size: 5,
+            content_md5: None,
+        };
+        assert!(!etags_match("def456", &meta));
     }
 }

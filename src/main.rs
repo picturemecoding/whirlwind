@@ -2,6 +2,7 @@ use std::collections::HashSet;
 use std::process;
 use std::sync::Arc;
 
+use chrono::Utc;
 use clap::Parser;
 
 use whirlwind::config::{Config, config_path};
@@ -9,7 +10,8 @@ use whirlwind::error::AppError;
 use whirlwind::lock::LockManager;
 use whirlwind::metadata::MetadataManager;
 use whirlwind::r2::R2Client;
-use whirlwind::sync::SyncEngine;
+use whirlwind::session;
+use whirlwind::sync::{self, SyncEngine};
 
 mod cli;
 use cli::{Cli, Commands};
@@ -69,24 +71,29 @@ async fn main() {
         }
 
         Commands::Status { project } => {
-            println!("status command coming in Phase 3 (not yet implemented)");
-            println!("Use `whirlwind list` to see all projects and lock status.");
-            let _ = project;
+            let (config, r2) = load_config_and_r2().await;
+            let metadata_manager = MetadataManager::new(Arc::clone(&r2));
+            if let Err(e) = run_status(&config, &r2, &metadata_manager, &project).await {
+                eprintln!("{}", e);
+                process::exit(e.exit_code());
+            }
         }
 
         Commands::Session { project } => {
-            println!("session command coming in Phase 2 (not yet implemented)");
-            println!("For now: pull manually, edit in Reaper, push manually.");
-            let _ = project;
+            let (config, r2) = load_config_and_r2().await;
+            let config = Arc::new(config);
+            if let Err(e) = session::run_session(&project, config, r2).await {
+                eprintln!("{}", e);
+                std::process::exit(e.exit_code());
+            }
         }
 
         Commands::Unlock { project, force } => {
-            println!("unlock command coming in Phase 3 (not yet implemented)");
-            println!(
-                "To manually break a lock: delete the lock file from your R2 bucket at locks/{}.lock",
-                project
-            );
-            let _ = force;
+            let (config, r2) = load_config_and_r2().await;
+            if let Err(e) = run_unlock(&config, &r2, &project, force).await {
+                eprintln!("{}", e);
+                process::exit(e.exit_code());
+            }
         }
     }
 }
@@ -372,12 +379,11 @@ async fn run_list(
 
     // Header.
     println!(
-        "{:<width_p$}  {:<width_s$}  {:<width_lb$}  {:<width_lpb$}  {}",
+        "{:<width_p$}  {:<width_s$}  {:<width_lb$}  {:<width_lpb$}  LAST PUSHED AT",
         "PROJECT",
         "STATUS",
         "LOCKED BY",
         "LAST PUSHED BY",
-        "LAST PUSHED AT",
         width_p = col_project,
         width_s = col_status,
         width_lb = col_locked_by,
@@ -479,16 +485,18 @@ async fn run_push(
 
     println!("Pushing {}...\n", project);
 
-    let summary = sync_engine.push(project, &local_dir).await.map_err(|e| {
-        // Lock is still held (guard hasn't dropped yet). Inform the user.
-        if !no_lock {
-            eprintln!(
-                "Upload failed. Lock retained — run `whirlwind push {}` to retry.",
-                project
-            );
-        }
-        e
-    })?;
+    let summary = sync_engine
+        .push(project, &local_dir)
+        .await
+        .inspect_err(|_| {
+            // Lock is still held (guard hasn't dropped yet). Inform the user.
+            if !no_lock {
+                eprintln!(
+                    "Upload failed. Lock retained — run `whirlwind push {}` to retry.",
+                    project
+                );
+            }
+        })?;
 
     // Record push metadata — best-effort, warn on errors.
     if let Err(e) = metadata_manager
@@ -505,4 +513,159 @@ async fn run_push(
 
     // _guard drops here, releasing the lock.
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// status handler
+// ---------------------------------------------------------------------------
+
+async fn run_status(
+    _config: &Config,
+    r2: &R2Client,
+    metadata_manager: &MetadataManager,
+    project: &str,
+) -> Result<(), AppError> {
+    use whirlwind::lock::{LockFile, STALE_LOCK_THRESHOLD_HOURS, is_stale};
+
+    println!("Project: {}", project);
+    println!();
+
+    // Lock status: attempt to fetch the lock file.
+    let lock_key = R2Client::lock_key(project);
+    match r2.get_object_bytes(&lock_key).await {
+        Ok(bytes) => match serde_json::from_slice::<LockFile>(&bytes) {
+            Ok(lock) => {
+                let age = Utc::now() - lock.locked_at;
+                println!("Status:    LOCKED");
+                println!("Locked by: {} ({})", lock.locked_by, lock.machine);
+                println!("Locked at: {}", lock.locked_at.format("%Y-%m-%d %H:%M UTC"));
+                println!("Lock age:  {}", format_duration(age));
+                if is_stale(&lock) {
+                    println!();
+                    println!(
+                        "WARNING: lock is over {} hours old — may be stale.",
+                        STALE_LOCK_THRESHOLD_HOURS
+                    );
+                    println!("         Run `whirlwind unlock {}` to break it.", project);
+                }
+            }
+            Err(_) => {
+                println!("Status:    LOCKED (lock file unreadable)");
+            }
+        },
+        Err(_) => {
+            println!("Status:    UNLOCKED");
+        }
+    }
+
+    println!();
+
+    // Push history from metadata.json.
+    let metadata = metadata_manager.load().await?;
+    if let Some(entry) = metadata.projects.get(project) {
+        println!("Last pushed by:  {}", entry.last_pushed_by);
+        println!(
+            "Last pushed at:  {}",
+            entry.last_pushed_at.format("%Y-%m-%d %H:%M UTC")
+        );
+        println!("File count:      {}", entry.object_count);
+        println!("Total size:      {}", sync::format_bytes(entry.total_bytes));
+    } else {
+        println!("No push history found. Has this project been pushed yet?");
+    }
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// unlock handler
+// ---------------------------------------------------------------------------
+
+async fn run_unlock(
+    config: &Config,
+    r2: &R2Client,
+    project: &str,
+    force: bool,
+) -> Result<(), AppError> {
+    use dialoguer::Confirm;
+    use whirlwind::lock::{LockFile, STALE_LOCK_THRESHOLD_HOURS, is_stale};
+
+    let lock_key = R2Client::lock_key(project);
+
+    // Fetch and display the current lock content.
+    match r2.get_object_bytes(&lock_key).await {
+        Ok(bytes) => match serde_json::from_slice::<LockFile>(&bytes) {
+            Ok(lock) => {
+                println!("Lock found for '{}':", project);
+                println!("  Locked by: {} ({})", lock.locked_by, lock.machine);
+                println!(
+                    "  Locked at: {}",
+                    lock.locked_at.format("%Y-%m-%d %H:%M UTC")
+                );
+                let age = Utc::now() - lock.locked_at;
+                println!("  Lock age:  {}", format_duration(age));
+
+                if is_stale(&lock) {
+                    println!(
+                        "  Status:    STALE (older than {} hours)",
+                        STALE_LOCK_THRESHOLD_HOURS
+                    );
+                }
+
+                let is_own = lock.locked_by == config.identity.user
+                    && lock.machine == config.identity.machine;
+                if is_own {
+                    println!("  (This is your own lock from a previous session.)");
+                }
+            }
+            Err(_) => {
+                println!(
+                    "Lock file exists for '{}' but could not be parsed.",
+                    project
+                );
+            }
+        },
+        Err(_) => {
+            println!("No lock found for '{}'. Nothing to unlock.", project);
+            return Ok(());
+        }
+    }
+
+    // Confirm unless --force was passed.
+    if !force {
+        println!();
+        let confirmed = Confirm::new()
+            .with_prompt(format!("Break the lock on '{}'?", project))
+            .default(false)
+            .interact()
+            .map_err(|e| AppError::Other(format!("prompt error: {}", e)))?;
+
+        if !confirmed {
+            println!("Aborted.");
+            return Ok(());
+        }
+    }
+
+    r2.delete_object(&lock_key).await?;
+    println!("Lock released for '{}'.", project);
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Private helpers
+// ---------------------------------------------------------------------------
+
+fn format_duration(d: chrono::Duration) -> String {
+    let hours = d.num_hours();
+    let minutes = d.num_minutes() % 60;
+    let seconds = d.num_seconds() % 60;
+
+    if hours > 0 {
+        format!("{}h {}m", hours, minutes)
+    } else if minutes > 0 {
+        format!("{}m {}s", minutes, seconds)
+    } else {
+        format!("{}s", seconds)
+    }
 }

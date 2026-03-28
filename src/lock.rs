@@ -32,6 +32,14 @@ pub struct LockGuard {
     r2: Arc<R2Client>,
 }
 
+impl std::fmt::Debug for LockGuard {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LockGuard")
+            .field("project", &self.project)
+            .finish_non_exhaustive()
+    }
+}
+
 impl Drop for LockGuard {
     fn drop(&mut self) {
         let key = R2Client::lock_key(&self.project);
@@ -209,13 +217,16 @@ mod tests {
     }
 
     #[test]
-    fn exactly_at_threshold_is_not_stale() {
+    fn just_under_threshold_is_not_stale() {
+        // Use a lock that is 1 minute short of the threshold to avoid a
+        // race between the two Utc::now() calls in the test and in is_stale().
         let lf = LockFile {
             locked_by: "alice".into(),
-            locked_at: Utc::now() - Duration::hours(STALE_LOCK_THRESHOLD_HOURS),
+            locked_at: Utc::now() - Duration::hours(STALE_LOCK_THRESHOLD_HOURS)
+                + Duration::minutes(1),
             machine: "m".into(),
         };
-        // Exactly at threshold: the comparison is >, so this should NOT be stale.
+        // Comparison is >, so sub-threshold locks must NOT be stale.
         assert!(!is_stale(&lf));
     }
 }
