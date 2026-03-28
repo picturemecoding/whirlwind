@@ -1,23 +1,39 @@
 name: CI
+
 on:
   push:
-    branches: [main]
+    branches: ["main"]
   pull_request:
-    branches: [main]
+    branches: ["**"]
+
+env:
+  CARGO_TERM_COLOR: always
+
 jobs:
-  check:
-    runs-on: ubuntu-latest
+  test:
+    name: Test (${{ matrix.os }})
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+
     steps:
       - uses: actions/checkout@v4
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just nextest
+
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
       - uses: Swatinem/rust-cache@v2
-      - name: Format check
-        run: cargo fmt --check
-      - name: Clippy
-        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: Run justfile Check
+        run: just check
+
       - name: Test
-        run: cargo test --all-targets --all-features
-      - name: Security audit
-        run: |
-          cargo install cargo-audit --quiet
-          cargo audit
+        run: just test
+
+      - name: Build release
+        run: just build
