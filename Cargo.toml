@@ -1,0 +1,38 @@
+[package]
+name = "whirlwind"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "whirlwind"
+path = "src/main.rs"
+
+[[test]]
+name = "spike_r2_conditional_put"
+path = "tests/spike_r2_conditional_put.rs"
+
+[[test]]
+name = "integration_test"
+path = "tests/integration_test.rs"
+
+[dependencies]
+aws-sdk-s3 = { version = "1", features = [] }
+aws-config = { version = "1", features = ["behavior-version-latest"] }
+aws-credential-types = { version = "1", features = ["hardcoded-credentials"] }
+tokio = { version = "1", features = ["full"] }
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+thiserror = "2"
+dirs = "5"
+bytes = "1"
+chrono = { version = "0.4", features = ["serde"] }
+walkdir = "2"
+md-5 = "0.10"
+dialoguer = "0.11"
+indicatif = "0.17"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full", "test-util"] }
+tempfile = "3"

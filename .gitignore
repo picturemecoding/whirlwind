@@ -1,0 +1,11 @@
+/target
+.bmo/
+
+# Credentials — never commit
+.env
+.env.*
+*.pem
+*.key
+*.p12
+# whirlwind config lives at ~/.config/whirlwind/config.toml — not in the repo
+config.toml
