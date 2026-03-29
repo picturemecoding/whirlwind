@@ -18,13 +18,23 @@ just fmt                  # auto-format code
 just build                # release build
 ```
 
-## Validating Source Code Changes
+### Auxiliary Tooling
+
+This project uses `bmo` for issue tracking and the terminal environment has the following tools available also: `rg` and `jq`. Thus, we can pipe `bmo` command with `--json` option outputs to `jq` to parse values we need to proceed.
+
+## Code Quality Requirements
 
 **Important**: all source code changes must go through the following steps!
 
 1. `just fmt`
 2. `just check`
 3. `just test`
+
+### Code Quality Rules
+
+- Always place imports (`use` statements) at the top of a module, NEVER INSIDE FUNCTION BODIES.
+- Perfer simple, readable code, no tornado code, no overlong functions.
+- Prefer functional patterns (map, filter) and pattern-matching.
 
 ## Architecture
 
