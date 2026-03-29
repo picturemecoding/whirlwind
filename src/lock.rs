@@ -57,7 +57,13 @@ impl Drop for LockGuard {
                 .expect("tokio runtime")
                 .block_on(async move {
                     if let Err(e) = r2.delete_object(&key).await {
-                        eprintln!("Warning: failed to release lock for {}: {}", project, e);
+                        eprintln!(
+                            "\nERROR: failed to release lock for '{}': {}\n\
+                            Your collaborator may hit a LockContention error on their next session.\n\
+                            Run `whirlwind unlock {}` to release it manually.",
+                            project, e, project
+                        );
+                        std::process::exit(1);
                     }
                 });
         })
