@@ -113,7 +113,7 @@ mod tests {
 
     #[test]
     fn add_file_bar_truncates_multibyte_utf8_filename() {
-        // Each '日' is 3 bytes; 15 repetitions = 45 chars = 135 bytes.
+        // Each '日' is 3 bytes; 45 repetitions = 45 chars = 135 bytes.
         // Slicing by byte offset would panic; slicing by char count must not.
         let reporter = ProgressReporter::new();
         let long_name = "日".repeat(45);

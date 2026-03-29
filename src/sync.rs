@@ -103,7 +103,7 @@ impl SyncEngine {
                 .collect::<Vec<_>>()
                 .join("/");
 
-            let r2_key = format!("projects/{}/{}", project, relative_path_str);
+            let r2_key = format!("{}{}", prefix, relative_path_str);
 
             // Resolve remote metadata for skip comparison:
             // - Not in list  → None (new file, upload unconditionally)

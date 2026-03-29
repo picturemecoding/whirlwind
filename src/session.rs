@@ -53,7 +53,10 @@ pub async fn run_session(
 
     println!(
         "Reaper launched (PID {}). Waiting for Reaper to exit...",
-        child.id().unwrap_or(0)
+        child
+            .id()
+            .map(|id| id.to_string())
+            .unwrap_or_else(|| "unknown".to_string())
     );
 
     // Step 5: Wait for Reaper to exit.
