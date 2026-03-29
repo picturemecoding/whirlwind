@@ -62,6 +62,10 @@ impl R2Client {
         format!("locks/{}.lock", project)
     }
 
+    pub fn template_key(template_name: &str) -> String {
+        format!("templates/{}.rpp", template_name)
+    }
+
     // -----------------------------------------------------------------------
     // Constructor
     // -----------------------------------------------------------------------
@@ -171,19 +175,38 @@ impl R2Client {
 
     /// Download an object and return its body as `Bytes`.
     ///
-    /// Maps SDK errors to `AppError::DownloadFailed`.
+    /// Maps HTTP 404 / NoSuchKey to `AppError::NotFound`; all other SDK errors
+    /// to `AppError::DownloadFailed`.
     pub async fn get_object_bytes(&self, key: &str) -> Result<Bytes, AppError> {
-        let resp = self
+        let result = self
             .client
             .get_object()
             .bucket(&self.bucket)
             .key(key)
             .send()
-            .await
-            .map_err(|e| AppError::DownloadFailed {
-                path: key.to_string(),
-                source: Box::new(e),
-            })?;
+            .await;
+
+        let resp = match result {
+            Ok(r) => r,
+            Err(sdk_err) => {
+                let http_status = sdk_err.raw_response().map(|r| r.status().as_u16());
+                if matches!(http_status, Some(404)) {
+                    return Err(AppError::NotFound {
+                        key: key.to_string(),
+                    });
+                }
+                let debug = format!("{:?}", sdk_err);
+                if debug.contains("NoSuchKey") {
+                    return Err(AppError::NotFound {
+                        key: key.to_string(),
+                    });
+                }
+                return Err(AppError::DownloadFailed {
+                    path: key.to_string(),
+                    source: Box::new(sdk_err),
+                });
+            }
+        };
 
         let body = resp
             .body

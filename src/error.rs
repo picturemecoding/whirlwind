@@ -33,6 +33,10 @@ pub enum AppError {
     #[error("Lock not found for {project}")]
     LockNotFound { project: String },
 
+    // R2 not-found
+    #[error("not found in R2: {key}")]
+    NotFound { key: String },
+
     // Sync errors
     #[error("Download failed for {path}: {source}")]
     DownloadFailed {
