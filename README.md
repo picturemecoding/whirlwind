@@ -58,7 +58,7 @@ Options:
 ### How it works
 
 - Downloads `templates/default.rpp` (or a named template) from R2
-- Downloads `templates/default-archetypes.toml` from R2 — maps filename glob patterns to named tracks in the template (e.g. `*_erik_*.wav` → `erik-mic`)
+- Reads `[[new.tracks]]` entries from `~/.config/whirlwind/config.toml` — maps filename glob patterns to named tracks in the template (e.g. `*_erik_*.wav` → `erik-mic`)
 - Matched audio files are inserted into the corresponding template track, preserving its EQ and plugin chain
 - Unmatched files (guests) are appended as plain tracks
 - The outro track position is set to `project_end - 3s`
@@ -74,48 +74,51 @@ Arguments:
   <episode-name>  Name of the episode directory under your working_dir
 
 Options:
-  --template <name>       Template to use (default: from config, else "default")
-  --trim-seconds <secs>   Seconds to trim from project end (default: from config, else 0)
-  --dry-run               Show what would happen without writing or pushing anything
+  --template <name>         Template to use (default: from config, else "default")
+  --trim-seconds <secs>     Seconds to trim from project end (default: from config, else 0)
+  --assign <TRACK=FILE>     Assign a file to a named track (repeatable)
+  --dry-run                 Show what would happen without writing or pushing anything
+```
+
+Use `--assign` to handle filenames that don't match your configured patterns:
+
+```sh
+whirlwind new ep96-database-history \
+  --assign "erik=riverside_ERIKLONGNAME_raw-audio_ep96.wav" \
+  --assign "mike=riverside_MIKELONGNAME_raw-audio_ep96.wav"
 ```
 
 ### Uploading your template
 
-Before using `whirlwind new`, upload your Reaper template and archetypes config to R2:
+Before using `whirlwind new`, upload your Reaper template to R2:
 
 ```sh
 aws s3 cp episode-base-template.rpp \
   s3://<bucket>/templates/default.rpp \
   --endpoint-url https://<account_id>.r2.cloudflarestorage.com
-
-aws s3 cp archetypes.toml \
-  s3://<bucket>/templates/default-archetypes.toml \
-  --endpoint-url https://<account_id>.r2.cloudflarestorage.com
 ```
 
 The template should have empty `<TRACK>` blocks (no `<ITEM>`) for host mic tracks, and fully configured items for intro/outro tracks.
 
-Example `archetypes.toml`:
-
-```toml
-[[archetypes]]
-pattern = "*_erik_*.wav"
-track = "erik-mic"
-
-[[archetypes]]
-pattern = "*_mike_*.wav"
-track = "mike-mic"
-```
-
 ### Config
 
-Add an optional `[new]` section to `~/.config/whirlwind/config.toml` to set defaults:
+Add an optional `[new]` section to `~/.config/whirlwind/config.toml` to set defaults and configure track matching:
 
 ```toml
 [new]
 default_template = "default"   # template name in R2
 trim_seconds = 2.0             # trim this many seconds from project end
+
+[[new.tracks]]
+track = "erik-mic"             # track name in the Reaper template
+pattern = "*_erik_*.wav"       # glob pattern matched against the audio filename
+
+[[new.tracks]]
+track = "mike-mic"
+pattern = "*_mike_*.wav"
 ```
+
+`[[new.tracks]]` patterns are matched in order — the first match wins. Use `--assign` to override per-run when a filename doesn't match your usual patterns.
 
 ## Purpose
 

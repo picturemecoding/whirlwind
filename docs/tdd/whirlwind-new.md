@@ -111,19 +111,13 @@ with `>`. Attributes are space-separated tokens on the opening line or on child 
 
 ## Template Design
 
-**Recommendation: Option B — separate `templates/archetypes.toml` in R2**
+Track-to-file matching is configured locally in `~/.config/whirlwind/config.toml` — there is
+no separate `archetypes.toml` file in R2. This keeps all whirlwind configuration in one place
+and eliminates a per-team R2 bootstrap step.
 
-Three options were considered:
+### Template structure
 
-| Option | Description | Problem |
-|---|---|---|
-| A: Track name patterns | Template tracks named `ARCHETYPE:*_host_name.wav` | Track names appear in Reaper UI — glob patterns are confusing |
-| **B: Separate TOML config** | `templates/archetypes.toml` maps patterns to track names in template | Clean separation; Reaper-stable; independently editable |
-| C: Embedded `.rpp` comments | Special comment markers in the `.rpp` | Reaper may strip unknown comments on save |
-
-### Option B design
-
-`templates/default.rpp` — a normal Reaper project with named tracks for each archetype ("guest-mic" may not be present!):
+`templates/default.rpp` — a normal Reaper project with named tracks:
 ```
 <TRACK {GUID}
   NAME "erik-mic"
@@ -133,11 +127,6 @@ Three options were considered:
 <TRACK {GUID}
   NAME "mike-mic"
   <FXCHAIN ... > (host EQ chain)
-  ← NO <ITEM> block — tool inserts the episode audio here
->
-<TRACK {GUID}
-  NAME "guest-mic"
-  <FXCHAIN ... > (guest EQ chain)
   ← NO <ITEM> block — tool inserts the episode audio here
 >
 <TRACK {GUID}
@@ -156,27 +145,16 @@ Three options were considered:
 >
 ```
 
-`templates/archetypes.toml` — maps filename glob patterns to template track names:
-```toml
-[[archetypes]]
-pattern = "*_erik_*.wav"
-track = "erik-mic"
+### Matching logic
 
-[[archetypes]]
-pattern = "*_mike_*.wav"
-track = "mike-mic"
+For each discovered audio file, matching proceeds in order (first match wins):
 
-[[archetypes]]
-pattern = "*-intro*"
-track = "intro"
+1. **CLI `--assign <track>=<file>`** — explicit per-run assignment; bypasses pattern matching entirely
+2. **`[[new.tracks]]` pattern** in `config.toml` — glob pattern match against the filename
+3. **No match** — file becomes a plain track (no FX chain); a notice is printed
 
-[[archetypes]]
-pattern = "*-outro*"
-track = "outro"
-```
-
-**Matching logic**: for each discovered audio file, test patterns in order (first match wins).
-If no pattern matches, the file gets a plain track with no FX chain.
+This means a user can rely on patterns day-to-day and only use `--assign` when Riverside
+generates a filename that doesn't match the configured pattern.
 
 ---
 
@@ -310,7 +288,6 @@ fn inserts_item_into_empty_named_track() {
 |---|---|
 | Default template | `templates/default.rpp` |
 | Named template | `templates/<name>.rpp` |
-| Archetypes config | `templates/<name>-archetypes.toml` (falls back to `templates/default-archetypes.toml`) |
 
 ### Fallback logic
 
@@ -339,10 +316,39 @@ New optional section in `~/.config/whirlwind/config.toml`:
 [new]
 default_template = "default"    # template name to use (omit to use "default")
 trim_seconds = 2.0              # trim this many seconds from project end
+
+[[new.tracks]]
+track = "erik-mic"              # track name in the Reaper template
+pattern = "*_erik_*.wav"        # glob pattern matched against the audio filename
+
+[[new.tracks]]
+track = "mike-mic"
+pattern = "*_mike_*.wav"
 ```
 
-Use `#[serde(default)]` so existing configs without a `[new]` section continue to work.
-`trim_seconds` defaults to `0.0` if omitted.
+- `tracks` is a list of `{ track, pattern }` entries. `pattern` is optional; if absent the entry
+  can only be assigned via `--assign`.
+- Use `#[serde(default)]` so existing configs without a `[new]` section continue to work.
+- `trim_seconds` defaults to `0.0` if omitted. `tracks` defaults to an empty list.
+
+Rust structs:
+
+```rust
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TrackConfig {
+    pub track: String,
+    pub pattern: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NewConfig {
+    pub default_template: Option<String>,
+    #[serde(default)]
+    pub trim_seconds: f64,
+    #[serde(default)]
+    pub tracks: Vec<TrackConfig>,
+}
+```
 
 ---
 
@@ -355,23 +361,33 @@ Arguments:
   <episode-name>  Name of the episode (must match working_dir/<episode-name>/)
 
 Options:
-  --template <name>       Template to use (default: from config, else "default")
-  --trim-seconds <secs>   Seconds to trim from project end (default: from config, else 0)
-  --dry-run               Show what would happen without writing or pushing anything
-  -h, --help              Print help
+  --template <name>         Template to use (default: from config, else "default")
+  --trim-seconds <secs>     Seconds to trim from project end (default: from config, else 0)
+  --assign <TRACK=FILE>     Assign a specific file to a named track (repeatable)
+  --dry-run                 Show what would happen without writing or pushing anything
+  -h, --help                Print help
 ```
+
+`--assign` can be repeated to assign multiple files:
+
+```sh
+whirlwind new ep-42 \
+  --assign "erik-mic=riverside_ERIKLONGNAME_raw-audio_ep42.wav" \
+  --assign "mike-mic=riverside_MIKELONGNAME_raw-audio_ep42.wav"
+```
+
+`--assign` takes precedence over any `[[new.tracks]]` pattern in the config.
 
 ### --dry-run output
 
 ```
 Dry run: whirlwind new ep-42
   Template: templates/default.rpp (from R2)
-  Archetypes: templates/default-archetypes.toml (from R2)
 
   Audio files found in /Users/alice/podcast/episodes/ep-42:
-    riverside_erik_aker_raw-audio_picture_me coding_0241.wav      (58:32.4)  → archetype: erik-mic
-    riverside_mike_the cohost_raw-audio_picture_me coding_0242.wav     (58:31.1)  → archetype: mike-mic
-    ep-42-guest-name.wav     ( 1:00.0)  → no archetype match — plain track
+    riverside_erik_aker_raw-audio_picture_me_coding_0241.wav  (58:32.4)  → track: erik-mic
+    riverside_mike_cohost_raw-audio_picture_me_coding_0242.wav  (58:31.1)  → track: mike-mic
+    ep-42-guest-name.wav  ( 1:00.0)  → no match — plain track
 
   Project end: 58:32.4 - 2.0s trim = 58:30.4
   Outro starts 3s before end! = 58:27.4
@@ -401,15 +417,18 @@ uuid = { version = "1", features = ["v4"] }  # GUID generation for new tracks
 ### `run_new` data flow
 
 ```
-run_new(episode_name, template_name, trim_seconds, dry_run)
+run_new(episode_name, template_name, trim_seconds, dry_run, assign: Vec<String>)
+  ├── parse_assign(assign)  → HashMap<filename, track_name>
   ├── R2Client::get_object_bytes("templates/<name>.rpp")  → rpp: String  (used as-is)
-  ├── R2Client::get_object_bytes("templates/<name>-archetypes.toml")  → archetypes: Vec<Archetype>
-  ├── discover_audio_files(local_dir)  → Vec<AudioFile { path, duration_secs }>
-  ├── for each audio_file:
-  │   ├── match_archetype(audio_file, archetypes)  → Option<&Archetype>
-  │   ├── if Some(archetype): project::set_track_item(rpp, archetype.track, file_path, duration)
-  │   └── if None: collect into unmatched_files
-  ├── project::insert_tracks(rpp, plain_tracks_for(unmatched_files))
+  ├── discover_audio_files(local_dir)  → Vec<(filename, duration_secs)>
+  ├── for each (filename, duration):
+  │   ├── resolve_track(filename, &assign_map, config.new.tracks)
+  │   │   1. assign_map.get(filename)           → explicit CLI assignment
+  │   │   2. config tracks glob pattern match   → pattern-based assignment
+  │   │   3. None                               → plain track
+  │   ├── if Some(track): project::set_track_item(rpp, track, filename, duration)
+  │   └── if None: collect into plain_tracks
+  ├── project::insert_tracks(rpp, plain_tracks)
   ├── project_end = max(durations) - trim_seconds
   ├── project::set_item_position(rpp, "outro", project_end - 3.0)
   ├── project::set_end_marker(rpp, project_end)
@@ -430,7 +449,7 @@ run_new(episode_name, template_name, trim_seconds, dry_run)
 | `.rpp` format changes across Reaper versions | Medium | Format has been stable for 10+ years but is undocumented. Parse only the specific sections needed; avoid assumptions about ordering. |
 | Plugin chain portability | High | FX chains reference plugins by name and VST ID. If the guest editor doesn't have the same plugins installed, Reaper will show missing-plugin warnings. This is a user/workflow concern, not a tool concern — document it. |
 | Sample rate mismatches | Low | Reaper handles sample rate conversion natively. Track duration calculation is still accurate (it reads the actual sample count from the header). |
-| Archetype ambiguity | Medium | A file matching multiple patterns gets the first match. Document this clearly in the archetypes TOML. |
+| Track match ambiguity | Medium | A file matching multiple `[[new.tracks]]` patterns gets the first match. Document this in config comments. `--assign` bypasses all patterns and is unambiguous. |
 | No audio files in directory | Low | Warn the user and prompt to continue (create an empty project) or abort. |
 | Template not found in R2 | High | Requires `NotFound` error variant (known gap from architecture.md) to give a good error message. |
 | `whirlwind template push` UX gap | Low | Users must use `aws s3 cp` to upload their template initially. A future `whirlwind template push <path>` command would close this. |
@@ -486,12 +505,13 @@ Complexity: Medium
 
 Acceptance: all WAV files appear as tracks; project end is correct; no FX chains yet.
 
-### Phase 4c — Archetype matching + FX chain application
+### Phase 4c — Track matching + FX chain application
 Complexity: Medium-High
 
-- `archetypes.toml` download and parsing
-- `match_archetype` with glob matching
-- `project::extract_fxchain` + chain injection into new tracks
+- `[[new.tracks]]` config entries with glob pattern matching
+- `--assign <track>=<file>` CLI flag for explicit per-run overrides
+- `resolve_track` logic: CLI assign → config pattern → plain track
+- `project::set_track_item` inserts audio into matching template tracks
 - Unmatched files become plain tracks
 
 Acceptance: matched tracks have correct FX chains; unmatched tracks are plain but present.

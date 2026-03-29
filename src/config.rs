@@ -14,10 +14,18 @@ pub struct Config {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TrackConfig {
+    pub track: String,
+    pub pattern: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NewConfig {
     pub default_template: Option<String>,
     #[serde(default)]
     pub trim_seconds: f64,
+    #[serde(default)]
+    pub tracks: Vec<TrackConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -262,6 +270,14 @@ machine = "alice-macbook"
 [new]
 default_template = "my-template"
 trim_seconds = 2.5
+
+[[new.tracks]]
+track = "erik-mic"
+pattern = "*_erik_*.wav"
+
+[[new.tracks]]
+track = "mike-mic"
+pattern = "*_mike_*.wav"
 "#;
         let config: Config = toml::from_str(toml_str).expect("deserialize failed");
         let new_cfg = config
@@ -270,6 +286,10 @@ trim_seconds = 2.5
             .expect("expected new section to be present");
         assert_eq!(new_cfg.default_template.as_deref(), Some("my-template"));
         assert_eq!(new_cfg.trim_seconds, 2.5);
+        assert_eq!(new_cfg.tracks.len(), 2);
+        assert_eq!(new_cfg.tracks[0].track, "erik-mic");
+        assert_eq!(new_cfg.tracks[0].pattern.as_deref(), Some("*_erik_*.wav"));
+        assert_eq!(new_cfg.tracks[1].track, "mike-mic");
 
         // Round-trip through serialization.
         let serialized = toml::to_string_pretty(&config).expect("serialize failed");
@@ -283,6 +303,37 @@ trim_seconds = 2.5
             Some("my-template")
         );
         assert_eq!(restored_new.trim_seconds, 2.5);
+        assert_eq!(restored_new.tracks.len(), 2);
+    }
+
+    #[test]
+    fn new_section_without_tracks_defaults_to_empty_vec() {
+        let toml_str = r#"
+[r2]
+account_id = "abc123"
+access_key_id = "KEY"
+secret_access_key = "SECRET"
+bucket = "my-bucket"
+
+[local]
+working_dir = "/Users/alice/podcast"
+
+[reaper]
+binary_path = "/Applications/REAPER.app/Contents/MacOS/REAPER"
+
+[identity]
+user = "alice"
+machine = "alice-macbook"
+
+[new]
+default_template = "default"
+"#;
+        let config: Config = toml::from_str(toml_str).expect("deserialize failed");
+        let new_cfg = config.new.as_ref().expect("expected new section");
+        assert!(
+            new_cfg.tracks.is_empty(),
+            "expected tracks to default to empty vec"
+        );
     }
 
     #[test]

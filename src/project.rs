@@ -63,6 +63,51 @@ fn find_block_end(lines: &[&str], start: usize) -> usize {
     lines.len().saturating_sub(1)
 }
 
+/// Return true if the TRACK block contains a direct-child `<ITEM` at depth 1.
+fn track_has_item(lines: &[&str], track_start: usize, track_end: usize) -> bool {
+    let mut depth: usize = 1;
+    let mut inside_fxchain = false;
+
+    for i in (track_start + 1)..=track_end {
+        if i >= lines.len() {
+            break;
+        }
+        let trimmed = lines[i].trim();
+
+        if !inside_fxchain && trimmed.starts_with("<FXCHAIN") {
+            inside_fxchain = true;
+            depth += 1;
+            continue;
+        }
+
+        if inside_fxchain {
+            if trimmed == ">" {
+                depth -= 1;
+                if depth == 1 {
+                    inside_fxchain = false;
+                }
+            } else if opens_block(lines[i]) {
+                depth += 1;
+            }
+            continue;
+        }
+
+        if depth == 1 && trimmed.starts_with("<ITEM") {
+            return true;
+        }
+
+        if opens_block(lines[i]) {
+            depth += 1;
+        } else if closes_block(lines[i]) {
+            depth -= 1;
+            if depth == 0 {
+                break;
+            }
+        }
+    }
+    false
+}
+
 /// Return true if the TRACK block from `track_start` to `track_end` (inclusive)
 /// contains a `NAME "track_name"` line at depth 1 (direct child, not nested).
 fn track_has_name(lines: &[&str], track_start: usize, track_end: usize, track_name: &str) -> bool {
@@ -101,7 +146,7 @@ fn track_has_name(lines: &[&str], track_start: usize, track_end: usize, track_na
             if depth == 0 {
                 break;
             }
-        } else if depth == 1 && trimmed.contains(target.as_str()) {
+        } else if depth == 1 && trimmed == target.as_str() {
             return true;
         }
     }
@@ -126,7 +171,9 @@ pub fn set_track_item(rpp: &str, track_name: &str, file_path: &str, duration_sec
         if line.trim_start().starts_with("<TRACK") {
             let track_end = find_block_end(&lines, i);
 
-            if track_has_name(&lines, i, track_end, track_name) {
+            if track_has_name(&lines, i, track_end, track_name)
+                && !track_has_item(&lines, i, track_end)
+            {
                 // Emit track lines, inserting the item block before the closing >.
                 for line in lines.iter().take(track_end).skip(i) {
                     out.push(line.to_string());
@@ -362,6 +409,47 @@ mod tests {
 >"#;
         let result = set_track_item(rpp, "erik-mic", "audio/erik-ep42.wav", 3612.5);
         assert_eq!(result, rpp, "Should return input unchanged");
+    }
+
+    #[test]
+    fn set_track_item_no_op_when_track_already_has_item() {
+        let rpp = r#"<REAPER_PROJECT 0.1 "6.0" 1234567890
+<TRACK {AAA}
+  NAME "outro"
+  <ITEM
+    POSITION 0
+    LENGTH 30
+    <SOURCE WAVE
+      FILE "audio/outro.wav"
+    >
+  >
+>
+>"#;
+        // Trying to insert into "outro" which already has an <ITEM> — must be a no-op.
+        let result = set_track_item(rpp, "outro", "audio/new-outro.wav", 30.0);
+        assert_eq!(
+            result, rpp,
+            "Should return input unchanged when track already has an item"
+        );
+        assert!(
+            !result.contains("audio/new-outro.wav"),
+            "New file must not appear in output"
+        );
+    }
+
+    #[test]
+    fn set_track_item_exact_name_match_does_not_match_prefix() {
+        // "erik" should not match a track named "erik-mic"
+        let rpp = r#"<REAPER_PROJECT 0.1 "6.0" 1234567890
+<TRACK {AAA}
+  NAME "erik-mic"
+>
+>"#;
+        let result = set_track_item(rpp, "erik", "audio/erik.wav", 100.0);
+        assert_eq!(
+            result, rpp,
+            "Partial name match must not insert into wrong track"
+        );
     }
 
     // -----------------------------------------------------------------------

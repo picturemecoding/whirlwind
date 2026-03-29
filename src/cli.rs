@@ -44,7 +44,8 @@ pub enum Commands {
     },
     /// Create a new episode project from a Reaper template
     New {
-        /// Episode name (must match a directory under working_dir)
+        /// Episode name; a directory under working_dir will be created if needed,
+        /// and any existing audio files there will be discovered
         episode: String,
         /// Template name to use (default: from config, else "default")
         #[arg(long)]
@@ -55,5 +56,8 @@ pub enum Commands {
         /// Show what would happen without writing or pushing anything
         #[arg(long)]
         dry_run: bool,
+        /// Assign a file to a named track: --assign <track>=<filename> (repeatable)
+        #[arg(long, value_name = "TRACK=FILE")]
+        assign: Vec<String>,
     },
 }

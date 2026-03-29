@@ -62,6 +62,10 @@ impl R2Client {
         format!("locks/{}.lock", project)
     }
 
+    pub fn template_key(template_name: &str) -> String {
+        format!("templates/{}.rpp", template_name)
+    }
+
     // -----------------------------------------------------------------------
     // Constructor
     // -----------------------------------------------------------------------
@@ -192,7 +196,7 @@ impl R2Client {
                     });
                 }
                 let debug = format!("{:?}", sdk_err);
-                if debug.contains("NoSuchKey") || debug.contains("NotFound") {
+                if debug.contains("NoSuchKey") {
                     return Err(AppError::NotFound {
                         key: key.to_string(),
                     });

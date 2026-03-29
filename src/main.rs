@@ -105,11 +105,20 @@ async fn main() {
             template,
             trim_seconds,
             dry_run,
+            assign,
         } => {
             let (config, r2) = load_config_and_r2().await;
             let config = Arc::new(config);
-            if let Err(e) =
-                new::run_new(&episode, template, trim_seconds, dry_run, config, r2).await
+            if let Err(e) = new::run_new(
+                &episode,
+                template,
+                trim_seconds,
+                dry_run,
+                assign,
+                config,
+                r2,
+            )
+            .await
             {
                 eprintln!("{}", e);
                 process::exit(e.exit_code());
