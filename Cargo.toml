@@ -3,6 +3,15 @@ name = "pmc-whirlwind"
 version = "0.1.1"
 edition = "2024"
 license = "GPL-3.0-or-later"
+rust-version = "1.94.0"
+description = "whirlwind is a collaborative Reaper project sync tool for podcast co-editors. It uses Cloudflare R2 for storage and synchronization."
+repository = "https://github.com/picturemecoding/whirlwind"
+homepage = "https://github.com/picturemecoding/whirlwind"
+documentation = "https://docs.rs/pmc-whirlwind"
+readme = "README.md"
+keywords = ["cli", "reaper", "podcast", "r2"]
+categories = ["command-line-utilities", "development-tools"]
+authors = ["Erik Aker <eraker@gmail.com>"]
 
 [[bin]]
 name = "whirlwind"
