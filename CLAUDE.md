@@ -18,6 +18,10 @@ just fmt                  # auto-format code
 just build                # release build
 ```
 
+### Auxiliary Tooling
+
+This project uses `bmo` for issue tracking and the terminal environment has the following tools available also: `rg` and `jq`. Thus, we can pipe `bmo` command with `--json` option outputs to `jq` to parse values we need to proceed.
+
 ## Validating Source Code Changes
 
 **Important**: all source code changes must go through the following steps!
@@ -28,11 +32,11 @@ just build                # release build
 
 ## Architecture
 
-`whirlwind` is a small Rust CLI with a library-style core in `src/`.
+`whirlwind` is a small Rust CLI.
 
 - `main.rs` / `cli.rs`: parse command-line args and dispatch commands.
-- `config.rs`: load and validate local config.
-- `session.rs`: lock an episode directory (using R2 object storage) and start Reaper session (unlock on exit).
+- `config.rs`: load and validate local config with Cloudflare R2 connection info and other identifying info.
+- `session.rs`: lock an episode directory (on the R2 object storage) and start Reaper session (unlock R2 object paths on exit).
 - `sync.rs`: orchestrate sync behavior and conflict handling.
 - `r2.rs`: Cloudflare R2 interactions (upload/download/list, conditional ops).
 

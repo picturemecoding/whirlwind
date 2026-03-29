@@ -500,7 +500,7 @@ async fn run_push(
         .record_push(
             project,
             &config.identity.user,
-            summary.files_uploaded as u32,
+            (summary.files_uploaded + summary.files_skipped) as u32,
             summary.total_bytes,
         )
         .await
@@ -633,8 +633,7 @@ async fn run_unlock(
             .map_err(|e| AppError::Other(format!("prompt error: {}", e)))?;
 
         if !confirmed {
-            println!("Aborted.");
-            return Ok(());
+            return Err(AppError::UserAborted);
         }
     }
 

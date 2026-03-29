@@ -62,12 +62,17 @@ pub enum AppError {
     // Other
     #[error("{0}")]
     Other(String),
+
+    // User-initiated abort
+    #[error("Aborted by user")]
+    UserAborted,
 }
 
 impl AppError {
     pub fn exit_code(&self) -> i32 {
         match self {
             AppError::LockContention { .. } | AppError::SelfLock { .. } => 2,
+            AppError::UserAborted => 3,
             AppError::Other(_) => 1,
             _ => 1,
         }
@@ -146,6 +151,11 @@ mod tests {
             machine: "alice-macbook".to_string(),
         };
         assert_eq!(self_lock.exit_code(), 2);
+    }
+
+    #[test]
+    fn exit_code_user_aborted_is_3() {
+        assert_eq!(AppError::UserAborted.exit_code(), 3);
     }
 
     #[test]

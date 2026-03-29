@@ -1,11 +1,12 @@
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 
-use md5::{Digest, Md5};
 use walkdir::WalkDir;
 
 use crate::error::AppError;
 use crate::progress::ProgressReporter;
+use crate::r2::compute_md5_hex as md5_hex;
 
 // ---------------------------------------------------------------------------
 // Summary types
@@ -45,6 +46,19 @@ impl SyncEngine {
     ///
     /// Does NOT delete any R2 objects — see TDD section 7 "Deletion Semantics".
     pub async fn push(&self, project: &str, local_dir: &Path) -> Result<PushSummary, AppError> {
+        // Fetch all remote objects in one request and index by full R2 key.
+        // This avoids N sequential head_object calls in the loop below.
+        // Single-part objects can use the ETag from list directly; multipart
+        // objects (ETag contains '-') still need head_object to get content_md5.
+        let prefix = crate::r2::R2Client::project_prefix(project);
+        let remote_index: HashMap<String, crate::r2::R2Object> = self
+            .r2
+            .list_objects(&prefix)
+            .await?
+            .into_iter()
+            .map(|obj| (format!("{}{}", prefix, obj.key), obj))
+            .collect();
+
         let reporter = ProgressReporter::new();
         let mut files_uploaded: usize = 0;
         let mut files_skipped: usize = 0;
@@ -91,19 +105,58 @@ impl SyncEngine {
 
             let r2_key = format!("projects/{}/{}", project, relative_path_str);
 
-            // Read file once; compute MD5 from the buffer to avoid a second read.
+            // Resolve remote metadata for skip comparison:
+            // - Not in list  → None (new file, upload unconditionally)
+            // - Single-part  → construct R2ObjectMeta from list data (no HEAD needed)
+            // - Multipart ETag (contains '-') → head_object to get content_md5
+            let r2_meta: Option<crate::r2::R2ObjectMeta> = match remote_index.get(&r2_key) {
+                None => None,
+                Some(obj) if obj.etag.contains('-') => {
+                    self.r2.head_object(&r2_key).await.ok().flatten()
+                }
+                Some(obj) => Some(crate::r2::R2ObjectMeta {
+                    etag: obj.etag.clone(),
+                    size: obj.size,
+                    content_md5: None,
+                }),
+            };
+
+            if let Some(ref meta) = r2_meta {
+                // Object exists in R2 — read the local file to compare digests.
+                let bytes_for_check = std::fs::read(abs_path).map_err(|e| AppError::IoError {
+                    path: relative_path_str.clone(),
+                    source: e,
+                })?;
+                let local_md5 = md5_hex(&bytes_for_check);
+                if etags_match(&local_md5, meta) {
+                    files_skipped += 1;
+                    continue;
+                }
+                // Not a match — upload using the bytes we already read.
+                let byte_count = bytes_for_check.len() as u64;
+                let bar = reporter.add_file_bar(&relative_path_str, byte_count);
+                self.r2
+                    .put_object(&r2_key, bytes_for_check)
+                    .await
+                    .map_err(|e| match e {
+                        AppError::UploadFailed { source, .. } => AppError::UploadFailed {
+                            path: relative_path_str.clone(),
+                            source,
+                        },
+                        other => other,
+                    })?;
+                bar.update(byte_count);
+                bar.finish(&relative_path_str, byte_count);
+                files_uploaded += 1;
+                total_bytes += byte_count;
+                continue;
+            }
+
+            // Object does not exist in R2 — read the file now and upload.
             let bytes = std::fs::read(abs_path).map_err(|e| AppError::IoError {
                 path: relative_path_str.clone(),
                 source: e,
             })?;
-            let local_md5 = md5_hex(&bytes);
-
-            if let Ok(Some(meta)) = self.r2.head_object(&r2_key).await
-                && etags_match(&local_md5, &meta)
-            {
-                files_skipped += 1;
-                continue;
-            }
 
             let byte_count = bytes.len() as u64;
             let bar = reporter.add_file_bar(&relative_path_str, byte_count);
@@ -239,13 +292,6 @@ impl SyncEngine {
 // ---------------------------------------------------------------------------
 // Private helpers
 // ---------------------------------------------------------------------------
-
-/// Compute the MD5 hex digest of a byte slice.
-fn md5_hex(data: &[u8]) -> String {
-    let mut hasher = Md5::new();
-    hasher.update(data);
-    format!("{:x}", hasher.finalize())
-}
 
 /// Compute the MD5 hex digest of a local file.
 fn compute_local_etag(path: &Path) -> Result<String, std::io::Error> {
