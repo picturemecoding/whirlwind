@@ -219,6 +219,14 @@ impl SyncEngine {
 
         for obj in &objects {
             // object.key is relative (prefix already stripped in r2.rs).
+            // Validate that the key does not escape local_dir via path traversal.
+            if !is_safe_r2_key(&obj.key) {
+                eprintln!(
+                    "Warning: skipping '{}': key contains path traversal components",
+                    obj.key
+                );
+                continue;
+            }
             let local_path = local_dir.join(&obj.key);
 
             // Skip unchanged files: if local copy exists and MD5 matches.
@@ -293,6 +301,19 @@ impl SyncEngine {
 // Private helpers
 // ---------------------------------------------------------------------------
 
+/// Return `true` if `key` is safe to join onto a local directory.
+///
+/// Rejects keys that are absolute or contain any `..` component, which would
+/// allow a malicious or compromised bucket to write files outside `local_dir`.
+fn is_safe_r2_key(key: &str) -> bool {
+    let path = Path::new(key);
+    if path.is_absolute() {
+        return false;
+    }
+    path.components()
+        .all(|c| c != std::path::Component::ParentDir)
+}
+
 /// Compute the MD5 hex digest of a local file.
 fn compute_local_etag(path: &Path) -> Result<String, std::io::Error> {
     Ok(md5_hex(&std::fs::read(path)?))
@@ -336,6 +357,26 @@ pub fn format_bytes(bytes: u64) -> String {
 mod tests {
     use super::*;
     use crate::r2::R2ObjectMeta;
+
+    #[test]
+    fn is_safe_r2_key_accepts_normal_keys() {
+        assert!(is_safe_r2_key("foo.rpp"));
+        assert!(is_safe_r2_key("subdir/foo.rpp"));
+        assert!(is_safe_r2_key("a/b/c.wav"));
+    }
+
+    #[test]
+    fn is_safe_r2_key_rejects_parent_dir_traversal() {
+        assert!(!is_safe_r2_key("../../.ssh/authorized_keys"));
+        assert!(!is_safe_r2_key("subdir/../../../etc/passwd"));
+        assert!(!is_safe_r2_key(".."));
+    }
+
+    #[test]
+    fn is_safe_r2_key_rejects_absolute_paths() {
+        assert!(!is_safe_r2_key("/etc/passwd"));
+        assert!(!is_safe_r2_key("/tmp/evil"));
+    }
 
     #[test]
     fn format_bytes_ranges() {

@@ -73,7 +73,7 @@ pub async fn run_session(
                 .record_push(
                     project,
                     &config.identity.user,
-                    summary.files_uploaded as u32,
+                    (summary.files_uploaded + summary.files_skipped) as u32,
                     summary.total_bytes,
                 )
                 .await

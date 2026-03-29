@@ -52,30 +52,24 @@ impl MetadataManager {
     /// Returns an empty [`Metadata`] on first run (object does not exist yet).
     /// Returns `Err(AppError::R2Error)` for real R2 failures.
     pub async fn load(&self) -> Result<Metadata, crate::error::AppError> {
-        // Use head_object to distinguish "not found" from "real error" without
-        // having to parse the error message string from get_object_bytes.
-        let exists = self
-            .r2
-            .head_object(crate::r2::R2Client::METADATA_KEY)
-            .await
-            .map_err(|e| crate::error::AppError::R2Error(e.to_string()))?;
-
-        if exists.is_none() {
-            // First run — no metadata.json yet.
-            return Ok(Metadata::default());
-        }
-
-        let bytes = self
+        match self
             .r2
             .get_object_bytes(crate::r2::R2Client::METADATA_KEY)
             .await
-            .map_err(|e| crate::error::AppError::R2Error(e.to_string()))?;
-
-        let metadata: Metadata = serde_json::from_slice(&bytes).map_err(|e| {
-            crate::error::AppError::R2Error(format!("failed to deserialize metadata.json: {}", e))
-        })?;
-
-        Ok(metadata)
+        {
+            Ok(bytes) => {
+                let metadata: Metadata = serde_json::from_slice(&bytes).map_err(|e| {
+                    crate::error::AppError::R2Error(format!(
+                        "failed to deserialize metadata.json: {}",
+                        e
+                    ))
+                })?;
+                Ok(metadata)
+            }
+            // First run — metadata.json does not exist yet.
+            Err(crate::error::AppError::DownloadFailed { .. }) => Ok(Metadata::default()),
+            Err(e) => Err(crate::error::AppError::R2Error(e.to_string())),
+        }
     }
 
     /// Save `metadata.json` to R2.
