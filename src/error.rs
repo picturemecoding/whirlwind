@@ -56,6 +56,8 @@ pub enum AppError {
     // Process errors
     #[error("Reaper binary not found at {path}. Check your config.")]
     ReaperNotFound { path: String },
+    #[error("No .rpp project file found in {dir}. Cannot launch Reaper.")]
+    RppNotFound { dir: String },
     #[error("Failed to launch Reaper: {0}")]
     ReaperSpawnFailed(String),
 

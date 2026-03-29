@@ -1,10 +1,41 @@
-use std::sync::Arc;
+use std::{path::Path, sync::Arc};
 use tokio::process::Command;
 
 use crate::{
     config::Config, error::AppError, lock::LockManager, metadata::MetadataManager, r2::R2Client,
     sync::SyncEngine,
 };
+
+/// Find the single `.rpp` / `.RPP` file in `dir`, returning an error if none exists.
+fn find_rpp(dir: &Path) -> Result<std::path::PathBuf, AppError> {
+    let matches: Vec<_> = std::fs::read_dir(dir)
+        .map_err(|e| AppError::IoError {
+            path: dir.display().to_string(),
+            source: e,
+        })?
+        .filter_map(|entry| entry.ok())
+        .map(|e| e.path())
+        .filter(|p| {
+            p.extension()
+                .and_then(|ext| ext.to_str())
+                .map(|ext| ext.eq_ignore_ascii_case("rpp"))
+                .unwrap_or(false)
+        })
+        .collect();
+
+    match matches.as_slice() {
+        [path] => Ok(path.clone()),
+        [] => Err(AppError::RppNotFound {
+            dir: dir.display().to_string(),
+        }),
+        _ => Err(AppError::RppNotFound {
+            dir: format!(
+                "{} (multiple .rpp files found — remove all but one)",
+                dir.display()
+            ),
+        }),
+    }
+}
 
 /// Run a full session: acquire lock, pull, launch Reaper, wait, push, release lock.
 ///
@@ -42,8 +73,8 @@ pub async fn run_session(
     // If pull fails, LockGuard drops here → lock released automatically.
 
     // Step 4: Launch Reaper.
-    let rpp_path = local_dir.join(format!("{}.rpp", project));
-    println!("Launching Reaper...");
+    let rpp_path = find_rpp(&local_dir)?;
+    println!("Launching Reaper with {}...", rpp_path.display());
 
     let mut child = Command::new(&config.reaper.binary_path)
         .arg(&rpp_path)
