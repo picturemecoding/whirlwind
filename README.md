@@ -2,6 +2,12 @@
 
 whirlwind is a collaborative Reaper project sync tool for podcast co-editors. It helps a small team keep project files in sync through Cloudflare R2-backed storage.
 
+## Reaper Users
+
+This project uses local paths for media. To make sure you are using local media paths in Reaper, see this recommendation from the docs:
+
+> In **Options > Preferences > Project** and check **"Save project file references with relative pathnames"**. This ensures all media files are stored within the project folder.
+
 ## Command Reference
 
 ```sh
