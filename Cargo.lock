@@ -1731,6 +1731,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "pmc-whirlwind"
+version = "0.1.0"
+dependencies = [
+ "aws-config",
+ "aws-credential-types",
+ "aws-sdk-s3",
+ "bytes",
+ "chrono",
+ "clap",
+ "dialoguer",
+ "dirs",
+ "indicatif",
+ "md-5",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "toml",
+ "walkdir",
+]
+
+[[package]]
 name = "portable-atomic"
 version = "1.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2691,29 +2714,6 @@ checksum = "5a6580f308b1fad9207618087a65c04e7a10bc77e02c8e84e9b00dd4b12fa0bb"
 dependencies = [
  "js-sys",
  "wasm-bindgen",
-]
-
-[[package]]
-name = "whirlwind"
-version = "0.1.0"
-dependencies = [
- "aws-config",
- "aws-credential-types",
- "aws-sdk-s3",
- "bytes",
- "chrono",
- "clap",
- "dialoguer",
- "dirs",
- "indicatif",
- "md-5",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 2.0.18",
- "tokio",
- "toml",
- "walkdir",
 ]
 
 [[package]]

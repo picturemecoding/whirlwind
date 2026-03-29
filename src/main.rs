@@ -4,14 +4,15 @@ use std::sync::Arc;
 
 use chrono::Utc;
 use clap::Parser;
+use dialoguer::{Confirm, Input, Password};
 
-use whirlwind::config::{Config, config_path};
-use whirlwind::error::AppError;
-use whirlwind::lock::LockManager;
-use whirlwind::metadata::MetadataManager;
-use whirlwind::r2::R2Client;
-use whirlwind::session;
-use whirlwind::sync::{self, SyncEngine};
+use pmc_whirlwind::config::{Config, config_path};
+use pmc_whirlwind::error::AppError;
+use pmc_whirlwind::lock::{LockFile, LockManager, STALE_LOCK_THRESHOLD_HOURS, is_stale};
+use pmc_whirlwind::metadata::MetadataManager;
+use pmc_whirlwind::r2::R2Client;
+use pmc_whirlwind::session;
+use pmc_whirlwind::sync::{self, SyncEngine};
 
 mod cli;
 use cli::{Cli, Commands};
@@ -125,8 +126,6 @@ async fn load_config_and_r2() -> (Config, Arc<R2Client>) {
 // ---------------------------------------------------------------------------
 
 async fn run_init() -> Result<(), AppError> {
-    use dialoguer::{Confirm, Input, Password};
-
     let path = config_path();
 
     // If config already exists, prompt for overwrite.
@@ -208,28 +207,28 @@ async fn run_init() -> Result<(), AppError> {
 
     // Build and validate config.
     let config = Config {
-        r2: whirlwind::config::R2Config {
+        r2: pmc_whirlwind::config::R2Config {
             account_id,
             access_key_id,
             secret_access_key,
             bucket,
         },
-        local: whirlwind::config::LocalConfig {
+        local: pmc_whirlwind::config::LocalConfig {
             working_dir: std::path::PathBuf::from(&working_dir_str),
         },
-        reaper: whirlwind::config::ReaperConfig {
+        reaper: pmc_whirlwind::config::ReaperConfig {
             binary_path: std::path::PathBuf::from(&reaper_binary_str),
         },
-        identity: whirlwind::config::IdentityConfig { user, machine },
+        identity: pmc_whirlwind::config::IdentityConfig { user, machine },
     };
 
     config.validate()?;
 
     // Test R2 connectivity before saving.
-    let r2 = R2Client::new(&config).await?;
-    r2.list_objects("")
-        .await
-        .map_err(|e| AppError::Other(format!("R2 connection test failed: {}", e)))?;
+    let r2 = pmc_whirlwind::r2::R2Client::new(&config).await?;
+    r2.list_objects("").await.map_err(|e| {
+        pmc_whirlwind::error::AppError::Other(format!("R2 connection test failed: {}", e))
+    })?;
 
     // Save config only after a successful R2 test.
     config.save()?;
@@ -251,8 +250,6 @@ async fn run_list(
     r2: &R2Client,
     metadata_manager: &MetadataManager,
 ) -> Result<(), AppError> {
-    use whirlwind::lock::{LockFile, is_stale};
-
     // Load metadata (empty on first run).
     let metadata = metadata_manager.load().await?;
 
@@ -525,8 +522,6 @@ async fn run_status(
     metadata_manager: &MetadataManager,
     project: &str,
 ) -> Result<(), AppError> {
-    use whirlwind::lock::{LockFile, STALE_LOCK_THRESHOLD_HOURS, is_stale};
-
     println!("Project: {}", project);
     println!();
 
@@ -587,9 +582,6 @@ async fn run_unlock(
     project: &str,
     force: bool,
 ) -> Result<(), AppError> {
-    use dialoguer::Confirm;
-    use whirlwind::lock::{LockFile, STALE_LOCK_THRESHOLD_HOURS, is_stale};
-
     let lock_key = R2Client::lock_key(project);
 
     // Fetch and display the current lock content.

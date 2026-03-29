@@ -16,13 +16,13 @@
 //!   WHIRLWIND_TEST_R2_BUCKET=... \
 //!   cargo test --test integration_test -- --nocapture
 
-use std::sync::Arc;
-use whirlwind::{
+use pmc_whirlwind::{
     config::{Config, IdentityConfig, LocalConfig, R2Config, ReaperConfig},
     error::AppError,
     lock::LockManager,
     r2::R2Client,
 };
+use std::sync::Arc;
 
 fn test_config() -> Option<Config> {
     let account_id = std::env::var("WHIRLWIND_TEST_R2_ACCOUNT_ID").ok()?;
@@ -99,7 +99,7 @@ async fn integration_push_pull_roundtrip() {
     let config = skip_without_r2!(test_config());
     let config = Arc::new(config);
     let r2 = Arc::new(R2Client::new(&config).await.expect("R2 client init"));
-    let sync_engine = whirlwind::sync::SyncEngine::new(Arc::clone(&r2));
+    let sync_engine = pmc_whirlwind::sync::SyncEngine::new(Arc::clone(&r2));
 
     let project = "integration-test-push-pull";
 
