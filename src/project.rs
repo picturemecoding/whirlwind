@@ -16,8 +16,14 @@ fn closes_block(line: &str) -> bool {
 
 /// Build the `<ITEM>` text to insert into a named track.
 fn item_block(file_path: &str, duration_secs: f64) -> String {
+    let iguid = format!("{{{}}}", Uuid::new_v4().to_string().to_uppercase());
+    let guid = format!("{{{}}}", Uuid::new_v4().to_string().to_uppercase());
+    let name = std::path::Path::new(file_path)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or(file_path);
     format!(
-        "  <ITEM\n    POSITION 0\n    SNAPOFFSET 0\n    LENGTH {duration_secs}\n    LOOP 0\n    ALLTAKES 0\n    FADEIN 1 0.01 0 1 0 0\n    FADEOUT 1 0.01 0 1 0 0\n    MUTE 0 0\n    <SOURCE WAVE\n      FILE \"{file_path}\"\n    >\n  >"
+        "    <ITEM\n      POSITION 0\n      SNAPOFFS 0\n      LENGTH {duration_secs}\n      LOOP 0\n      ALLTAKES 0\n      FADEIN 1 0 0 1 0 0 0\n      FADEOUT 1 0 0 1 0 0 0\n      MUTE 0 0\n      SEL 0\n      IGUID {iguid}\n      IID 1\n      NAME {name}\n      VOLPAN 1 0 1 -1\n      SOFFS 0\n      PLAYRATE 1 1 0 -1 0 0.0025\n      CHANMODE 0\n      GUID {guid}\n      <SOURCE WAVE\n        FILE \"{file_path}\"\n      >\n    >"
     )
 }
 
@@ -63,8 +69,13 @@ fn find_block_end(lines: &[&str], start: usize) -> usize {
     lines.len().saturating_sub(1)
 }
 
-/// Return true if the TRACK block contains a direct-child `<ITEM` at depth 1.
-fn track_has_item(lines: &[&str], track_start: usize, track_end: usize) -> bool {
+/// Find the first direct-child `<ITEM` block within a track, returning its
+/// `(start_line, end_line)` range (inclusive). Returns `None` if absent.
+fn find_direct_item(
+    lines: &[&str],
+    track_start: usize,
+    track_end: usize,
+) -> Option<(usize, usize)> {
     let mut depth: usize = 1;
     let mut inside_fxchain = false;
 
@@ -93,7 +104,8 @@ fn track_has_item(lines: &[&str], track_start: usize, track_end: usize) -> bool 
         }
 
         if depth == 1 && trimmed.starts_with("<ITEM") {
-            return true;
+            let item_end = find_block_end(lines, i);
+            return Some((i, item_end));
         }
 
         if opens_block(lines[i]) {
@@ -105,13 +117,25 @@ fn track_has_item(lines: &[&str], track_start: usize, track_end: usize) -> bool 
             }
         }
     }
-    false
+    None
+}
+
+/// Extract the track name value from a `NAME` attribute line (trimmed).
+///
+/// Handles both Reaper's quoted form (`NAME "track name"`) and unquoted form
+/// (`NAME trackname`). Returns `None` if the line is not a NAME attribute.
+fn parse_name_value(trimmed: &str) -> Option<&str> {
+    let rest = trimmed.strip_prefix("NAME ")?;
+    if let Some(inner) = rest.strip_prefix('"') {
+        inner.strip_suffix('"')
+    } else {
+        Some(rest)
+    }
 }
 
 /// Return true if the TRACK block from `track_start` to `track_end` (inclusive)
-/// contains a `NAME "track_name"` line at depth 1 (direct child, not nested).
+/// contains a `NAME` line (quoted or unquoted) matching `track_name` at depth 1.
 fn track_has_name(lines: &[&str], track_start: usize, track_end: usize, track_name: &str) -> bool {
-    let target = format!("NAME \"{track_name}\"");
     let mut depth: usize = 1;
     let mut inside_fxchain = false;
 
@@ -146,7 +170,10 @@ fn track_has_name(lines: &[&str], track_start: usize, track_end: usize, track_na
             if depth == 0 {
                 break;
             }
-        } else if depth == 1 && trimmed == target.as_str() {
+        } else if depth == 1
+            && let Some(name) = parse_name_value(trimmed)
+            && name == track_name
+        {
             return true;
         }
     }
@@ -157,8 +184,11 @@ fn track_has_name(lines: &[&str], track_start: usize, track_end: usize, track_na
 // Public API
 // ---------------------------------------------------------------------------
 
-/// Insert an `<ITEM>` block into an existing named track (track must have no
-/// existing `<ITEM>`). Returns the string unchanged if the track is not found.
+/// Insert or replace the `<ITEM>` block in an existing named track.
+///
+/// - If the track has no existing `<ITEM>`, inserts one before the track's closing `>`.
+/// - If the track already has an `<ITEM>` (e.g. a placeholder), replaces it.
+/// - Returns the string unchanged if the named track is not found.
 pub fn set_track_item(rpp: &str, track_name: &str, file_path: &str, duration_secs: f64) -> String {
     let lines: Vec<&str> = rpp.lines().collect();
     let n = lines.len();
@@ -171,14 +201,19 @@ pub fn set_track_item(rpp: &str, track_name: &str, file_path: &str, duration_sec
         if line.trim_start().starts_with("<TRACK") {
             let track_end = find_block_end(&lines, i);
 
-            if track_has_name(&lines, i, track_end, track_name)
-                && !track_has_item(&lines, i, track_end)
-            {
-                // Emit track lines, inserting the item block before the closing >.
-                for line in lines.iter().take(track_end).skip(i) {
-                    out.push(line.to_string());
+            if track_has_name(&lines, i, track_end, track_name) {
+                let existing_item = find_direct_item(&lines, i, track_end);
+                // Emit track lines, skipping any existing <ITEM> block.
+                for (k, line) in lines.iter().enumerate().take(track_end).skip(i) {
+                    if let Some((s, e)) = existing_item
+                        && k >= s
+                        && k <= e
+                    {
+                        continue;
+                    }
+                    out.push((*line).to_string());
                 }
-                // Insert <ITEM> block.
+                // Insert new <ITEM> block before the closing >.
                 let item = item_block(file_path, duration_secs);
                 for item_line in item.lines() {
                     out.push(item_line.to_string());
@@ -350,13 +385,19 @@ pub fn set_end_marker(rpp: &str, end_secs: f64) -> String {
 ///
 /// The track name is derived from the filename stem. The GUID is a fresh UUID v4.
 pub fn build_plain_track(file_path: &str, duration_secs: f64) -> String {
-    let guid = format!("{{{}}}", Uuid::new_v4().to_string().to_uppercase());
-    let name = std::path::Path::new(file_path)
+    let track_guid = format!("{{{}}}", Uuid::new_v4().to_string().to_uppercase());
+    let iguid = format!("{{{}}}", Uuid::new_v4().to_string().to_uppercase());
+    let item_guid = format!("{{{}}}", Uuid::new_v4().to_string().to_uppercase());
+    let stem = std::path::Path::new(file_path)
         .file_stem()
         .and_then(|s| s.to_str())
         .unwrap_or(file_path);
+    let name = std::path::Path::new(file_path)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or(file_path);
     format!(
-        "<TRACK {guid}\n  NAME \"{name}\"\n  <ITEM\n    POSITION 0\n    SNAPOFFSET 0\n    LENGTH {duration_secs}\n    LOOP 0\n    ALLTAKES 0\n    FADEIN 1 0.01 0 1 0 0\n    FADEOUT 1 0.01 0 1 0 0\n    MUTE 0 0\n    <SOURCE WAVE\n      FILE \"{file_path}\"\n    >\n  >\n>"
+        "<TRACK {track_guid}\n  NAME {stem}\n  <ITEM\n    POSITION 0\n    SNAPOFFS 0\n    LENGTH {duration_secs}\n    LOOP 0\n    ALLTAKES 0\n    FADEIN 1 0 0 1 0 0 0\n    FADEOUT 1 0 0 1 0 0 0\n    MUTE 0 0\n    SEL 0\n    IGUID {iguid}\n    IID 1\n    NAME {name}\n    VOLPAN 1 0 1 -1\n    SOFFS 0\n    PLAYRATE 1 1 0 -1 0 0.0025\n    CHANMODE 0\n    GUID {item_guid}\n    <SOURCE WAVE\n      FILE \"{file_path}\"\n    >\n  >\n>"
     )
 }
 
@@ -376,7 +417,7 @@ mod tests {
     fn set_track_item_inserts_into_named_track() {
         let rpp = r#"<REAPER_PROJECT 0.1 "6.0" 1234567890
 <TRACK {AAA}
-  NAME "erik-mic"
+  NAME "erik"
   <FXCHAIN
     SHOW 0
     <VST "VST3: ReaEQ" reaEQ.vst3 0 "" >
@@ -385,7 +426,7 @@ mod tests {
   >
 >
 >"#;
-        let result = set_track_item(rpp, "erik-mic", "audio/erik-ep42.wav", 3612.5);
+        let result = set_track_item(rpp, "erik", "audio/erik-ep42.wav", 3612.5);
         assert!(
             result.contains(r#"FILE "audio/erik-ep42.wav""#),
             "FILE path missing:\n{result}"
@@ -407,39 +448,55 @@ mod tests {
   NAME "other-track"
 >
 >"#;
-        let result = set_track_item(rpp, "erik-mic", "audio/erik-ep42.wav", 3612.5);
+        let result = set_track_item(rpp, "erik", "audio/erik-ep42.wav", 3612.5);
         assert_eq!(result, rpp, "Should return input unchanged");
     }
 
     #[test]
-    fn set_track_item_no_op_when_track_already_has_item() {
+    fn set_track_item_replaces_existing_item() {
         let rpp = r#"<REAPER_PROJECT 0.1 "6.0" 1234567890
 <TRACK {AAA}
-  NAME "outro"
+  NAME "mike"
+  <FXCHAIN
+    SHOW 0
+  >
   <ITEM
     POSITION 0
     LENGTH 30
     <SOURCE WAVE
-      FILE "audio/outro.wav"
+      FILE "audio/placeholder.wav"
     >
   >
 >
 >"#;
-        // Trying to insert into "outro" which already has an <ITEM> — must be a no-op.
-        let result = set_track_item(rpp, "outro", "audio/new-outro.wav", 30.0);
-        assert_eq!(
-            result, rpp,
-            "Should return input unchanged when track already has an item"
+        // Track has a placeholder <ITEM> — set_track_item must replace it.
+        let result = set_track_item(rpp, "mike", "audio/ep42-mike.wav", 3600.0);
+        assert!(
+            result.contains(r#"FILE "audio/ep42-mike.wav""#),
+            "New FILE must appear:\n{result}"
         );
         assert!(
-            !result.contains("audio/new-outro.wav"),
-            "New file must not appear in output"
+            !result.contains(r#"FILE "audio/placeholder.wav""#),
+            "Old FILE must be gone:\n{result}"
+        );
+        assert!(
+            result.contains("LENGTH 3600"),
+            "New LENGTH must appear:\n{result}"
+        );
+        assert!(
+            result.contains("<FXCHAIN"),
+            "FXCHAIN must be preserved:\n{result}"
+        );
+        assert_eq!(
+            result.matches("<ITEM").count(),
+            1,
+            "Exactly one <ITEM> expected:\n{result}"
         );
     }
 
     #[test]
     fn set_track_item_exact_name_match_does_not_match_prefix() {
-        // "erik" should not match a track named "erik-mic"
+        // looking for "erik" must not insert into a track named "erik-mic"
         let rpp = r#"<REAPER_PROJECT 0.1 "6.0" 1234567890
 <TRACK {AAA}
   NAME "erik-mic"
@@ -448,7 +505,22 @@ mod tests {
         let result = set_track_item(rpp, "erik", "audio/erik.wav", 100.0);
         assert_eq!(
             result, rpp,
-            "Partial name match must not insert into wrong track"
+            "Should not match 'erik-mic' when searching for 'erik'"
+        );
+    }
+
+    #[test]
+    fn set_track_item_handles_unquoted_track_name() {
+        // Reaper saves simple names without quotes: NAME erik (not NAME "erik")
+        let rpp = r#"<REAPER_PROJECT 0.1 "6.0" 1234567890
+<TRACK {AAA}
+  NAME erik
+>
+>"#;
+        let result = set_track_item(rpp, "erik", "audio/ep42-erik.wav", 3600.0);
+        assert!(
+            result.contains(r#"FILE "audio/ep42-erik.wav""#),
+            "Should insert into unquoted-name track:\n{result}"
         );
     }
 

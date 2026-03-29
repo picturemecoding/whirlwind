@@ -412,11 +412,11 @@ mod tests {
     fn erik_mike_tracks() -> Vec<TrackConfig> {
         vec![
             TrackConfig {
-                track: "erik-mic".to_string(),
+                track: "erik".to_string(),
                 pattern: Some("*_erik_*.wav".to_string()),
             },
             TrackConfig {
-                track: "mike-mic".to_string(),
+                track: "mike".to_string(),
                 pattern: Some("*_mike_*.wav".to_string()),
             },
         ]
@@ -428,30 +428,24 @@ mod tests {
 
     #[test]
     fn parse_assign_single_entry() {
-        let assigns = vec!["erik-mic=riverside_eriklongname_ep42.wav".to_string()];
+        let assigns = vec!["erik=riverside_eriklongname_ep42.wav".to_string()];
         let map = parse_assign(&assigns);
         assert_eq!(
             map.get("riverside_eriklongname_ep42.wav")
                 .map(|s| s.as_str()),
-            Some("erik-mic")
+            Some("erik")
         );
     }
 
     #[test]
     fn parse_assign_multiple_entries() {
         let assigns = vec![
-            "erik-mic=file_erik.wav".to_string(),
-            "mike-mic=file_mike.wav".to_string(),
+            "erik=file_erik.wav".to_string(),
+            "mike=file_mike.wav".to_string(),
         ];
         let map = parse_assign(&assigns);
-        assert_eq!(
-            map.get("file_erik.wav").map(|s| s.as_str()),
-            Some("erik-mic")
-        );
-        assert_eq!(
-            map.get("file_mike.wav").map(|s| s.as_str()),
-            Some("mike-mic")
-        );
+        assert_eq!(map.get("file_erik.wav").map(|s| s.as_str()), Some("erik"));
+        assert_eq!(map.get("file_mike.wav").map(|s| s.as_str()), Some("mike"));
     }
 
     #[test]
@@ -477,7 +471,7 @@ mod tests {
         let tracks = erik_mike_tracks();
         let result = match_track_config("riverside_erik_aker_raw-audio_ep42.wav", &tracks);
         assert!(result.is_some());
-        assert_eq!(result.unwrap().track, "erik-mic");
+        assert_eq!(result.unwrap().track, "erik");
     }
 
     #[test]
@@ -485,7 +479,7 @@ mod tests {
         let tracks = erik_mike_tracks();
         let result = match_track_config("riverside_mike_cohost_raw-audio_ep42.wav", &tracks);
         assert!(result.is_some());
-        assert_eq!(result.unwrap().track, "mike-mic");
+        assert_eq!(result.unwrap().track, "mike");
     }
 
     #[test]
@@ -505,7 +499,7 @@ mod tests {
     fn match_track_config_first_match_wins() {
         let tracks = vec![
             TrackConfig {
-                track: "erik-mic".to_string(),
+                track: "erik".to_string(),
                 pattern: Some("*_erik_*.wav".to_string()),
             },
             TrackConfig {
@@ -515,7 +509,7 @@ mod tests {
         ];
         let result = match_track_config("riverside_erik_aker_ep42.wav", &tracks);
         assert!(result.is_some());
-        assert_eq!(result.unwrap().track, "erik-mic");
+        assert_eq!(result.unwrap().track, "erik");
     }
 
     // -----------------------------------------------------------------------
@@ -526,10 +520,10 @@ mod tests {
     fn resolve_track_cli_assign_overrides_config_pattern() {
         let tracks = erik_mike_tracks();
         let mut assign_map = HashMap::new();
-        // Explicitly assign this file to "erik-mic" even though it wouldn't match the glob
-        assign_map.insert("oddname.wav".to_string(), "erik-mic".to_string());
+        // Explicitly assign this file to "erik" even though it wouldn't match the glob
+        assign_map.insert("oddname.wav".to_string(), "erik".to_string());
         let result = resolve_track("oddname.wav", &assign_map, &tracks);
-        assert_eq!(result, Some("erik-mic"));
+        assert_eq!(result, Some("erik"));
     }
 
     #[test]
@@ -537,7 +531,7 @@ mod tests {
         let tracks = erik_mike_tracks();
         let assign_map = HashMap::new();
         let result = resolve_track("riverside_erik_aker_ep42.wav", &assign_map, &tracks);
-        assert_eq!(result, Some("erik-mic"));
+        assert_eq!(result, Some("erik"));
     }
 
     #[test]

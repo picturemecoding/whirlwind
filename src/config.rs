@@ -272,11 +272,11 @@ default_template = "my-template"
 trim_seconds = 2.5
 
 [[new.tracks]]
-track = "erik-mic"
+track = "erik"
 pattern = "*_erik_*.wav"
 
 [[new.tracks]]
-track = "mike-mic"
+track = "mike"
 pattern = "*_mike_*.wav"
 "#;
         let config: Config = toml::from_str(toml_str).expect("deserialize failed");
@@ -287,9 +287,9 @@ pattern = "*_mike_*.wav"
         assert_eq!(new_cfg.default_template.as_deref(), Some("my-template"));
         assert_eq!(new_cfg.trim_seconds, 2.5);
         assert_eq!(new_cfg.tracks.len(), 2);
-        assert_eq!(new_cfg.tracks[0].track, "erik-mic");
+        assert_eq!(new_cfg.tracks[0].track, "erik");
         assert_eq!(new_cfg.tracks[0].pattern.as_deref(), Some("*_erik_*.wav"));
-        assert_eq!(new_cfg.tracks[1].track, "mike-mic");
+        assert_eq!(new_cfg.tracks[1].track, "mike");
 
         // Round-trip through serialization.
         let serialized = toml::to_string_pretty(&config).expect("serialize failed");

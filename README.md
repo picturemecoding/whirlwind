@@ -45,7 +45,7 @@ Options:
    cp /path/to/recordings/*.wav ~/podcast/episodes/ep96-database-history/
    ```
 
-2. Run `whirlwind new`:
+2. Run `whirlwind new <episode-directory-name>`:
    ```sh
    whirlwind new ep96-database-history
    ```
@@ -58,7 +58,7 @@ Options:
 ### How it works
 
 - Downloads `templates/default.rpp` (or a named template) from R2
-- Reads `[[new.tracks]]` entries from `~/.config/whirlwind/config.toml` — maps filename glob patterns to named tracks in the template (e.g. `*_erik_*.wav` → `erik-mic`)
+- Reads `[[new.tracks]]` entries from `~/.config/whirlwind/config.toml` — maps filename glob patterns to named tracks in the template (e.g. `*_erik_*.wav` → `erik`)
 - Matched audio files are inserted into the corresponding template track, preserving its EQ and plugin chain
 - Unmatched files (guests) are appended as plain tracks
 - The outro track position is set to `project_end - 3s`
@@ -106,15 +106,15 @@ Add an optional `[new]` section to `~/.config/whirlwind/config.toml` to set defa
 
 ```toml
 [new]
-default_template = "default"   # template name in R2
+default_template = "default"   # template name in R2 (without file extension)
 trim_seconds = 2.0             # trim this many seconds from project end
 
 [[new.tracks]]
-track = "erik-mic"             # track name in the Reaper template
+track = "erik"             # track name in the Reaper template
 pattern = "*_erik_*.wav"       # glob pattern matched against the audio filename
 
 [[new.tracks]]
-track = "mike-mic"
+track = "mike"
 pattern = "*_mike_*.wav"
 ```
 

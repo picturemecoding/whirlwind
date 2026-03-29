@@ -76,7 +76,7 @@ with `>`. Attributes are space-separated tokens on the opening line or on child 
     FADEOUT 1 0.01 0 1 0 0
     MUTE 0 0
     <SOURCE WAVE
-      FILE "audio/erik-mic.wav"
+      FILE "audio/erik.wav"
     >
   >
 >
@@ -99,7 +99,7 @@ with `>`. Attributes are space-separated tokens on the opening line or on child 
   or extended item.
 
 - **`FILE`** — path to the audio file, relative to the `.rpp` file location. Use forward slashes
-  on all platforms. The path should be relative (e.g., `audio/erik-mic.wav`), not absolute.
+  on all platforms. The path should be relative (e.g., `audio/erik.wav`), not absolute.
 
 - **Project end marker** — set via a `MARKER` line at the project root level:
   ```
@@ -120,12 +120,12 @@ and eliminates a per-team R2 bootstrap step.
 `templates/default.rpp` — a normal Reaper project with named tracks:
 ```
 <TRACK {GUID}
-  NAME "erik-mic"
+  NAME "erik"
   <FXCHAIN ... > (fully configured EQ + compression)
   ← NO <ITEM> block — tool inserts the episode audio here
 >
 <TRACK {GUID}
-  NAME "mike-mic"
+  NAME "mike"
   <FXCHAIN ... > (host EQ chain)
   ← NO <ITEM> block — tool inserts the episode audio here
 >
@@ -265,13 +265,13 @@ Unit tests use small fixture strings — not full `.rpp` files. For example:
 fn inserts_item_into_empty_named_track() {
     let rpp = r#"<REAPER_PROJECT 0.1 "6.0" 1234567890
 <TRACK {GUID}
-  NAME "erik-mic"
+  NAME "erik"
   <FXCHAIN
     <VST "VST3: ReaEQ" reaEQ.vst3 0 "" >
   >
 >
 >"#;
-    let result = set_track_item(rpp, "erik-mic", "audio/erik-ep42.wav", 3612.5);
+    let result = set_track_item(rpp, "erik", "audio/erik-ep42.wav", 3612.5);
     assert!(result.contains(r#"FILE "audio/erik-ep42.wav""#));
     assert!(result.contains("LENGTH 3612.5"));
     assert!(result.contains("<FXCHAIN")); // FX chain preserved
@@ -318,11 +318,11 @@ default_template = "default"    # template name to use (omit to use "default")
 trim_seconds = 2.0              # trim this many seconds from project end
 
 [[new.tracks]]
-track = "erik-mic"              # track name in the Reaper template
+track = "erik"              # track name in the Reaper template
 pattern = "*_erik_*.wav"        # glob pattern matched against the audio filename
 
 [[new.tracks]]
-track = "mike-mic"
+track = "mike"
 pattern = "*_mike_*.wav"
 ```
 
@@ -372,8 +372,8 @@ Options:
 
 ```sh
 whirlwind new ep-42 \
-  --assign "erik-mic=riverside_ERIKLONGNAME_raw-audio_ep42.wav" \
-  --assign "mike-mic=riverside_MIKELONGNAME_raw-audio_ep42.wav"
+  --assign "erik=riverside_ERIKLONGNAME_raw-audio_ep42.wav" \
+  --assign "mike=riverside_MIKELONGNAME_raw-audio_ep42.wav"
 ```
 
 `--assign` takes precedence over any `[[new.tracks]]` pattern in the config.
@@ -385,8 +385,8 @@ Dry run: whirlwind new ep-42
   Template: templates/default.rpp (from R2)
 
   Audio files found in /Users/alice/podcast/episodes/ep-42:
-    riverside_erik_aker_raw-audio_picture_me_coding_0241.wav  (58:32.4)  → track: erik-mic
-    riverside_mike_cohost_raw-audio_picture_me_coding_0242.wav  (58:31.1)  → track: mike-mic
+    riverside_erik_aker_raw-audio_picture_me_coding_0241.wav  (58:32.4)  → track: erik
+    riverside_mike_cohost_raw-audio_picture_me_coding_0242.wav  (58:31.1)  → track: mike
     ep-42-guest-name.wav  ( 1:00.0)  → no match — plain track
 
   Project end: 58:32.4 - 2.0s trim = 58:30.4
