@@ -46,6 +46,7 @@ fn test_config() -> Option<Config> {
             user: "test-user".to_string(),
             machine: "test-machine".to_string(),
         },
+        new: None,
     })
 }
 

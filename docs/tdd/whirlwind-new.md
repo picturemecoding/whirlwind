@@ -9,22 +9,17 @@
 ## Problem Statement
 
 Setting up a new Reaper project for a podcast episode involves the same manual steps every time:
-create a project from the template, add each audio file as a track, apply the correct EQ/plugin
-chain to each track based on what it is (host mic, guest mic, outro music, etc.), set the project
-end point, and push to R2. This takes hours per episode and is error-prone.
+1) create a project from the template (in object-storage at R2 `${bucket}/templates/${template-name}.rpp`), 2) copy each audio file as a track into existing host-mic track (with existing plugins, EQ, etc., staying the same), 3) set the outro at a few seconds before the host tracks end, and push to R2. This takes hours over time and is error-prone.
 
-`whirlwind new <episode-name>` automates this setup. The episode directory may already exist
-and contain recorded audio files. The command produces a fully configured Reaper project ready
-to open and edit.
+`whirlwind new <episode-name>` automates this setup. The episode directory may already exist and contain recorded audio files. The command produces a fully configured Reaper project ready to open and edit.
 
 ### What this command does
 
-1. Downloads a Reaper project template from R2
+1. Downloads a Reaper project template from R2 (`${bucket}/templates/${template-name}.rpp`, example: `whirlwind/templates/episode-base-template.RPP`).
 2. Discovers audio files already present in the episode directory
-3. Inserts each audio file as a track in the project
-4. Applies EQ and plugin chain from a matching archetype (by filename pattern) to each track
-5. Calculates project end point from track lengths minus a configurable trim offset
-6. Pushes the resulting project to R2
+3. Inserts each audio file as a track in the project (remove existing similar-named (for host) track and insert similar-named track in same slot (with all plugins preserved))
+4. Calculates project end point from track lengths minus a configurable trim offset
+5. Pushes the resulting project to R2
 
 ### Explicit non-goals
 
@@ -38,7 +33,7 @@ to open and edit.
 
 - `whirlwind new ep-42` in a directory containing WAV files produces a `.rpp` file that opens
   correctly in Reaper with all audio files on tracks
-- Tracks matching a filename pattern have the correct FX chain applied
+- Tracks matching a filename pattern have been inserted into the right track
 - Tracks not matching any pattern are present as plain tracks, not silently dropped
 - The project end marker is set to `max(track_lengths) - trim_seconds`
 - The resulting project is pushed to R2 and locked correctly
@@ -81,7 +76,7 @@ with `>`. Attributes are space-separated tokens on the opening line or on child 
     FADEOUT 1 0.01 0 1 0 0
     MUTE 0 0
     <SOURCE WAVE
-      FILE "audio/host-mic.wav"
+      FILE "audio/erik-mic.wav"
     >
   >
 >
@@ -97,14 +92,14 @@ with `>`. Attributes are space-separated tokens on the opening line or on child 
   collisions when Reaper loads the project. Generate with UUID v4, formatted as
   `{XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX}`.
 
-- **`POSITION`** — media item position in seconds from project start. For a podcast, all tracks
+- **`POSITION`** — media item position in seconds from project start. For a podcast, all tracks (EXCEPT THE OUTRO!)
   start at position 0.
 
 - **`LENGTH`** — media item length in seconds. Must be accurate or Reaper will show a truncated
   or extended item.
 
 - **`FILE`** — path to the audio file, relative to the `.rpp` file location. Use forward slashes
-  on all platforms. The path should be relative (e.g., `audio/host-mic.wav`), not absolute.
+  on all platforms. The path should be relative (e.g., `audio/erik-mic.wav`), not absolute.
 
 - **Project end marker** — set via a `MARKER` line at the project root level:
   ```
@@ -122,37 +117,58 @@ Three options were considered:
 
 | Option | Description | Problem |
 |---|---|---|
-| A: Track name patterns | Template tracks named `ARCHETYPE:*-host.wav` | Track names appear in Reaper UI — glob patterns are confusing |
+| A: Track name patterns | Template tracks named `ARCHETYPE:*_host_name.wav` | Track names appear in Reaper UI — glob patterns are confusing |
 | **B: Separate TOML config** | `templates/archetypes.toml` maps patterns to track names in template | Clean separation; Reaper-stable; independently editable |
 | C: Embedded `.rpp` comments | Special comment markers in the `.rpp` | Reaper may strip unknown comments on save |
 
 ### Option B design
 
-`templates/default.rpp` — a normal Reaper project with named tracks for each archetype:
+`templates/default.rpp` — a normal Reaper project with named tracks for each archetype ("guest-mic" may not be present!):
 ```
 <TRACK {GUID}
-  NAME "host-mic"
+  NAME "erik-mic"
   <FXCHAIN ... > (fully configured EQ + compression)
+  ← NO <ITEM> block — tool inserts the episode audio here
+>
+<TRACK {GUID}
+  NAME "mike-mic"
+  <FXCHAIN ... > (host EQ chain)
+  ← NO <ITEM> block — tool inserts the episode audio here
 >
 <TRACK {GUID}
   NAME "guest-mic"
   <FXCHAIN ... > (guest EQ chain)
+  ← NO <ITEM> block — tool inserts the episode audio here
+>
+<TRACK {GUID}
+  NAME "intro"
+  <FXCHAIN ... > (music chain, different levels)
+  <ITEM POSITION 0 ...>  ← kept as-is; tool never touches intro
+    <SOURCE WAVE FILE "audio/intro.wav">
+  >
 >
 <TRACK {GUID}
   NAME "outro"
   <FXCHAIN ... > (music chain, different levels)
+  <ITEM ...>  ← POSITION updated to project_end - 3.0; FILE left as-is
+    <SOURCE WAVE FILE "audio/outro.wav">
+  >
 >
 ```
 
 `templates/archetypes.toml` — maps filename glob patterns to template track names:
 ```toml
 [[archetypes]]
-pattern = "*-host*.wav"
-track = "host-mic"
+pattern = "*_erik_*.wav"
+track = "erik-mic"
 
 [[archetypes]]
-pattern = "*-guest*.wav"
-track = "guest-mic"
+pattern = "*_mike_*.wav"
+track = "mike-mic"
+
+[[archetypes]]
+pattern = "*-intro*"
+track = "intro"
 
 [[archetypes]]
 pattern = "*-outro*"
@@ -226,36 +242,41 @@ A naive angle-bracket parser fails because VST attribute lines contain unbalance
 in base64 blobs. A full parser is a significant undertaking (500+ lines). The targeted approach
 is ~150 lines, fully testable with small fixture snippets, and sufficient for this use case.
 
+### Key design decision: update items in-place, never rebuild tracks
+
+The template is treated as the source of truth for all track-level config (FX chains, EQ,
+compression, fades, volume, pan). The tool only updates the parts that change per episode:
+
+- **Host mic tracks** (erik, mike): have no `<ITEM>` in the template — the tool inserts one.
+- **Intro track**: left completely untouched — audio, fades, and position are already correct.
+- **Outro track**: only `POSITION` is updated to `project_end - 3.0` seconds.
+- **Unmatched audio files**: appended as plain tracks with no FX chain.
+
+This means `<FXCHAIN>` base64 blobs are **never extracted, copied, or reconstructed** —
+they stay in the template untouched, eliminating the main source of corruption risk.
+
 ### `src/project.rs` public API
 
 ```rust
-/// Parse a .rpp file and extract the FX chain block for a named track.
-pub fn extract_fxchain(rpp: &str, track_name: &str) -> Option<String>;
+/// Insert an <ITEM> block into an existing named track (track must have no existing <ITEM>).
+pub fn set_track_item(rpp: &str, track_name: &str, file_path: &str, duration_secs: f64) -> String;
 
-/// Build a new TRACK block for a given audio file, with an optional FX chain.
-pub fn build_track(
-    file_path: &str,     // relative path to audio file
-    track_name: &str,    // display name
-    duration_secs: f64,
-    fxchain: Option<&str>,
-) -> String;
+/// Update the POSITION of the <ITEM> in a named track (used for outro placement).
+pub fn set_item_position(rpp: &str, track_name: &str, position_secs: f64) -> String;
 
-/// Insert track blocks before the closing `>` of the project root.
+/// Append new plain TRACK blocks (no FX chain) before the closing `>` of the project root.
 pub fn insert_tracks(rpp: &str, tracks: &[String]) -> String;
 
 /// Set or replace the project end marker.
 pub fn set_end_marker(rpp: &str, end_secs: f64) -> String;
-
-/// Strip all existing TRACK blocks from a template (leaving project-level config intact).
-pub fn strip_tracks(rpp: &str) -> String;
 ```
 
 ### State machine approach
 
 Track blocks are delimited by `<TRACK` and a matching `>` at the same nesting depth.
 The parser maintains a depth counter: `<` increments, `>` decrements, and we're inside a track
-block when depth > 0 after seeing `<TRACK`. FX chain extraction uses the same depth tracking
-within the track block.
+block when depth > 0 after seeing `<TRACK`. Item insertion uses the same depth tracking to
+find the correct closing `>` of the target track.
 
 ### Testing
 
@@ -263,16 +284,19 @@ Unit tests use small fixture strings — not full `.rpp` files. For example:
 
 ```rust
 #[test]
-fn extracts_fxchain_from_named_track() {
-    let rpp = r#"<TRACK {GUID}
-  NAME "host-mic"
+fn inserts_item_into_empty_named_track() {
+    let rpp = r#"<REAPER_PROJECT 0.1 "6.0" 1234567890
+<TRACK {GUID}
+  NAME "erik-mic"
   <FXCHAIN
-    <VST "VST3: ReaEQ" ... >
+    <VST "VST3: ReaEQ" reaEQ.vst3 0 "" >
   >
+>
 >"#;
-    let chain = extract_fxchain(rpp, "host-mic").unwrap();
-    assert!(chain.contains("<FXCHAIN"));
-    assert!(chain.contains("ReaEQ"));
+    let result = set_track_item(rpp, "erik-mic", "audio/erik-ep42.wav", 3612.5);
+    assert!(result.contains(r#"FILE "audio/erik-ep42.wav""#));
+    assert!(result.contains("LENGTH 3612.5"));
+    assert!(result.contains("<FXCHAIN")); // FX chain preserved
 }
 ```
 
@@ -345,13 +369,13 @@ Dry run: whirlwind new ep-42
   Archetypes: templates/default-archetypes.toml (from R2)
 
   Audio files found in /Users/alice/podcast/episodes/ep-42:
-    ep-42-host-mic.wav      (58:32.4)  → archetype: host-mic
-    ep-42-guest-mic.wav     (58:31.1)  → archetype: guest-mic
-    ep-42-outro.wav         ( 0:42.0)  → archetype: outro
-    ep-42-room-tone.wav     ( 1:00.0)  → no archetype match — plain track
+    riverside_erik_aker_raw-audio_picture_me coding_0241.wav      (58:32.4)  → archetype: erik-mic
+    riverside_mike_the cohost_raw-audio_picture_me coding_0242.wav     (58:31.1)  → archetype: mike-mic
+    ep-42-guest-name.wav     ( 1:00.0)  → no archetype match — plain track
 
   Project end: 58:32.4 - 2.0s trim = 58:30.4
-  Output: /Users/alice/podcast/episodes/ep-42/ep-42.rpp
+  Outro starts 3s before end! = 58:27.4
+  Output: /Users/erewok/podcast/episodes/ep-42/ep-42.rpp
   Would push to: projects/ep-42/ in R2
 
 No files written (dry run).
@@ -378,16 +402,17 @@ uuid = { version = "1", features = ["v4"] }  # GUID generation for new tracks
 
 ```
 run_new(episode_name, template_name, trim_seconds, dry_run)
-  ├── R2Client::get_object_bytes("templates/<name>.rpp")  → template_rpp: String
+  ├── R2Client::get_object_bytes("templates/<name>.rpp")  → rpp: String  (used as-is)
   ├── R2Client::get_object_bytes("templates/<name>-archetypes.toml")  → archetypes: Vec<Archetype>
   ├── discover_audio_files(local_dir)  → Vec<AudioFile { path, duration_secs }>
-  ├── project::strip_tracks(template_rpp)  → base_rpp: String
   ├── for each audio_file:
   │   ├── match_archetype(audio_file, archetypes)  → Option<&Archetype>
-  │   ├── if Some(archetype): project::extract_fxchain(template_rpp, archetype.track)
-  │   └── project::build_track(file_path, track_name, duration, fxchain)
-  ├── project::insert_tracks(base_rpp, tracks)
-  ├── project::set_end_marker(rpp, max_duration - trim_seconds)
+  │   ├── if Some(archetype): project::set_track_item(rpp, archetype.track, file_path, duration)
+  │   └── if None: collect into unmatched_files
+  ├── project::insert_tracks(rpp, plain_tracks_for(unmatched_files))
+  ├── project_end = max(durations) - trim_seconds
+  ├── project::set_item_position(rpp, "outro", project_end - 3.0)
+  ├── project::set_end_marker(rpp, project_end)
   ├── write rpp to local_dir/<episode_name>.rpp
   └── if !dry_run:
       ├── LockManager::acquire(episode_name)
@@ -417,11 +442,11 @@ run_new(episode_name, template_name, trim_seconds, dry_run)
 ### Unit tests (`src/project.rs`)
 
 All pure functions are tested with small inline fixture strings:
-- `extract_fxchain` — finds named track, returns None for missing track
-- `build_track` — output contains correct FILE path and LENGTH
-- `insert_tracks` — tracks appear before final `>` in output
-- `set_end_marker` — existing marker is replaced, not duplicated
-- `strip_tracks` — no `<TRACK` blocks remain in output
+- `set_track_item` — inserts `<ITEM>` into correct named track; `<FXCHAIN>` is preserved
+- `set_track_item` — returns error (or unchanged) if track not found
+- `set_item_position` — POSITION value updated in correct track; other tracks unaffected
+- `insert_tracks` — plain tracks appear before final `>` in output; no `<FXCHAIN>` present
+- `set_end_marker` — existing marker is replaced, not duplicated; inserted if absent
 
 ### Duration tests
 
@@ -445,7 +470,7 @@ Manual end-to-end checklist (not automated):
 Complexity: Low
 
 - Download template from R2
-- Strip all tracks from template
+- Insert matching tracks from template
 - Write empty project to local dir
 - Push to R2 (acquires lock, uploads, releases)
 

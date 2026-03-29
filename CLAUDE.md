@@ -38,19 +38,15 @@ This project uses `bmo` for issue tracking and the terminal environment has the 
 
 ## Architecture
 
-`whirlwind` is a small Rust CLI.
+`whirlwind` is a CLI tool for collaborative Reaper DAW project sync backed by Cloudflare R2.
+
+Two users share a project directory in R2 and coordinate edits through a distributed lock protocol built on `If-None-Match: *` conditional PUT. The tool is a locally-installed binary; there is no server-side component.
 
 - `main.rs` / `cli.rs`: parse command-line args and dispatch commands.
 - `config.rs`: load and validate local config with Cloudflare R2 connection info and other identifying info.
-- `session.rs`: lock an episode directory (on the R2 object storage) and start Reaper session (unlock R2 object paths on exit).
+- `session.rs` / `lock.rs`: lock an episode directory (on the R2 object storage) and start Reaper session (unlock R2 object paths on exit).
 - `sync.rs`: orchestrate sync behavior and conflict handling.
 - `r2.rs`: Cloudflare R2 interactions (upload/download/list, conditional ops).
-
-## Key design patterns
-
-Use these patterns consistently when adding features:
-
-...
 
 ## Integration tests
 

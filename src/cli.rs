@@ -42,4 +42,18 @@ pub enum Commands {
         #[arg(long)]
         force: bool,
     },
+    /// Create a new episode project from a Reaper template
+    New {
+        /// Episode name (must match a directory under working_dir)
+        episode: String,
+        /// Template name to use (default: from config, else "default")
+        #[arg(long)]
+        template: Option<String>,
+        /// Seconds to trim from project end (default: from config, else 0)
+        #[arg(long)]
+        trim_seconds: Option<f64>,
+        /// Show what would happen without writing or pushing anything
+        #[arg(long)]
+        dry_run: bool,
+    },
 }

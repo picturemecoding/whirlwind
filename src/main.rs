@@ -12,6 +12,7 @@ use pmc_whirlwind::config::{Config, config_path};
 use pmc_whirlwind::error::AppError;
 use pmc_whirlwind::lock::{LockFile, LockManager, STALE_LOCK_THRESHOLD_HOURS, is_stale};
 use pmc_whirlwind::metadata::MetadataManager;
+use pmc_whirlwind::new;
 use pmc_whirlwind::r2::R2Client;
 use pmc_whirlwind::session;
 use pmc_whirlwind::sync::{self, SyncEngine};
@@ -94,6 +95,22 @@ async fn main() {
         Commands::Unlock { project, force } => {
             let (config, r2) = load_config_and_r2().await;
             if let Err(e) = run_unlock(&config, &r2, &project, force).await {
+                eprintln!("{}", e);
+                process::exit(e.exit_code());
+            }
+        }
+
+        Commands::New {
+            episode,
+            template,
+            trim_seconds,
+            dry_run,
+        } => {
+            let (config, r2) = load_config_and_r2().await;
+            let config = Arc::new(config);
+            if let Err(e) =
+                new::run_new(&episode, template, trim_seconds, dry_run, config, r2).await
+            {
                 eprintln!("{}", e);
                 process::exit(e.exit_code());
             }
@@ -222,6 +239,7 @@ async fn run_init() -> Result<(), AppError> {
             binary_path: std::path::PathBuf::from(&reaper_binary_str),
         },
         identity: pmc_whirlwind::config::IdentityConfig { user, machine },
+        new: None,
     };
 
     config.validate()?;

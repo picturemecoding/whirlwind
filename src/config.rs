@@ -9,6 +9,15 @@ pub struct Config {
     pub local: LocalConfig,
     pub reaper: ReaperConfig,
     pub identity: IdentityConfig,
+    #[serde(default)]
+    pub new: Option<NewConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NewConfig {
+    pub default_template: Option<String>,
+    #[serde(default)]
+    pub trim_seconds: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -185,6 +194,7 @@ mod tests {
                 user: "alice".to_string(),
                 machine: "alice-macbook".to_string(),
             },
+            new: None,
         }
     }
 
@@ -202,6 +212,107 @@ mod tests {
         assert_eq!(restored.reaper.binary_path, original.reaper.binary_path);
         assert_eq!(restored.identity.user, original.identity.user);
         assert_eq!(restored.identity.machine, original.identity.machine);
+    }
+
+    #[test]
+    fn config_without_new_section_deserializes() {
+        let toml_str = r#"
+[r2]
+account_id = "abc123"
+access_key_id = "KEY"
+secret_access_key = "SECRET"
+bucket = "my-bucket"
+
+[local]
+working_dir = "/Users/alice/podcast"
+
+[reaper]
+binary_path = "/Applications/REAPER.app/Contents/MacOS/REAPER"
+
+[identity]
+user = "alice"
+machine = "alice-macbook"
+"#;
+        let config: Config = toml::from_str(toml_str).expect("deserialize failed");
+        assert!(
+            config.new.is_none(),
+            "expected new to be None when section is absent"
+        );
+    }
+
+    #[test]
+    fn config_with_new_section_round_trips() {
+        let toml_str = r#"
+[r2]
+account_id = "abc123"
+access_key_id = "KEY"
+secret_access_key = "SECRET"
+bucket = "my-bucket"
+
+[local]
+working_dir = "/Users/alice/podcast"
+
+[reaper]
+binary_path = "/Applications/REAPER.app/Contents/MacOS/REAPER"
+
+[identity]
+user = "alice"
+machine = "alice-macbook"
+
+[new]
+default_template = "my-template"
+trim_seconds = 2.5
+"#;
+        let config: Config = toml::from_str(toml_str).expect("deserialize failed");
+        let new_cfg = config
+            .new
+            .as_ref()
+            .expect("expected new section to be present");
+        assert_eq!(new_cfg.default_template.as_deref(), Some("my-template"));
+        assert_eq!(new_cfg.trim_seconds, 2.5);
+
+        // Round-trip through serialization.
+        let serialized = toml::to_string_pretty(&config).expect("serialize failed");
+        let restored: Config = toml::from_str(&serialized).expect("re-deserialize failed");
+        let restored_new = restored
+            .new
+            .as_ref()
+            .expect("expected new section after round-trip");
+        assert_eq!(
+            restored_new.default_template.as_deref(),
+            Some("my-template")
+        );
+        assert_eq!(restored_new.trim_seconds, 2.5);
+    }
+
+    #[test]
+    fn trim_seconds_defaults_to_zero_when_field_absent() {
+        let toml_str = r#"
+[r2]
+account_id = "abc123"
+access_key_id = "KEY"
+secret_access_key = "SECRET"
+bucket = "my-bucket"
+
+[local]
+working_dir = "/Users/alice/podcast"
+
+[reaper]
+binary_path = "/Applications/REAPER.app/Contents/MacOS/REAPER"
+
+[identity]
+user = "alice"
+machine = "alice-macbook"
+
+[new]
+default_template = "default"
+"#;
+        let config: Config = toml::from_str(toml_str).expect("deserialize failed");
+        let new_cfg = config.new.as_ref().expect("expected new section");
+        assert_eq!(
+            new_cfg.trim_seconds, 0.0,
+            "expected trim_seconds to default to 0.0"
+        );
     }
 
     #[test]
