@@ -15,10 +15,10 @@ jobs:
         include:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-musl
-            artifact: bmo-linux-x86_64
+            artifact: whirlwind-linux-x86_64
           - os: macos-latest
             target: aarch64-apple-darwin
-            artifact: bmo-macos-aarch64
+            artifact: whirlwind-macos-aarch64
     runs-on: ${{ matrix.os }}
 
     steps:
@@ -39,7 +39,7 @@ jobs:
 
       - name: Rename artifact
         run: |
-          cp target/${{ matrix.target }}/release/bmo ${{ matrix.artifact }}
+          cp target/${{ matrix.target }}/release/whirlwind ${{ matrix.artifact }}
 
       - uses: actions/upload-artifact@v4
         with:
