@@ -1,5 +1,5 @@
-use std::process::Command;
 use std::sync::Arc;
+use tokio::process::Command;
 
 use crate::{
     config::Config, error::AppError, lock::LockManager, metadata::MetadataManager, r2::R2Client,
@@ -53,12 +53,16 @@ pub async fn run_session(
 
     println!(
         "Reaper launched (PID {}). Waiting for Reaper to exit...",
-        child.id()
+        child
+            .id()
+            .map(|id| id.to_string())
+            .unwrap_or_else(|| "unknown".to_string())
     );
 
     // Step 5: Wait for Reaper to exit.
     let status = child
         .wait()
+        .await
         .map_err(|e| AppError::ReaperSpawnFailed(e.to_string()))?;
     println!("Reaper exited ({}). Pushing changes...", status);
 
@@ -72,7 +76,7 @@ pub async fn run_session(
                 .record_push(
                     project,
                     &config.identity.user,
-                    summary.files_uploaded as u32,
+                    (summary.files_uploaded + summary.files_skipped) as u32,
                     summary.total_bytes,
                 )
                 .await

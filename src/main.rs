@@ -2,6 +2,8 @@ use std::collections::HashSet;
 use std::process;
 use std::sync::Arc;
 
+use futures::future::join_all;
+
 use chrono::Utc;
 use clap::Parser;
 use dialoguer::{Confirm, Input, Password};
@@ -256,30 +258,27 @@ async fn run_list(
     // List active locks.
     let lock_objects = r2.list_objects("locks/").await?;
 
-    // Parse lock files: key is "<project>.lock" relative to "locks/".
-    // We fetch each lock file body to get locked_by / locked_at.
-    let mut lock_map: std::collections::HashMap<String, LockFile> =
-        std::collections::HashMap::new();
-
-    for obj in &lock_objects {
-        // obj.key is relative to "locks/" prefix, e.g. "episode-47.lock"
+    // Fetch all lock file bodies concurrently — one GET per lock object.
+    let lock_futures = lock_objects.iter().map(|obj| {
         let project_name = obj
             .key
             .strip_suffix(".lock")
             .unwrap_or(&obj.key)
             .to_string();
-
         let full_key = format!("locks/{}", obj.key);
-        match r2.get_object_bytes(&full_key).await {
-            Ok(bytes) => {
-                if let Ok(lock_file) = serde_json::from_slice::<LockFile>(&bytes) {
-                    lock_map.insert(project_name, lock_file);
-                }
-            }
-            Err(_) => {
-                // Lock disappeared between list and get — skip.
-            }
+        async move { (project_name, r2.get_object_bytes(&full_key).await) }
+    });
+
+    let mut lock_map: std::collections::HashMap<String, LockFile> =
+        std::collections::HashMap::new();
+
+    for (project_name, result) in join_all(lock_futures).await {
+        if let Ok(bytes) = result
+            && let Ok(lock_file) = serde_json::from_slice::<LockFile>(&bytes)
+        {
+            lock_map.insert(project_name, lock_file);
         }
+        // Err: lock disappeared between list and get — skip.
     }
 
     // Build the combined set of project names from metadata + active locks.
@@ -460,12 +459,11 @@ async fn run_push(
     let local_dir = config.local.working_dir.join(project);
 
     if !local_dir.exists() {
-        eprintln!(
+        return Err(AppError::Other(format!(
             "Local directory '{}' does not exist. Run `whirlwind pull {}` first.",
             local_dir.display(),
             project
-        );
-        process::exit(1);
+        )));
     }
 
     // Acquire lock unless --no-lock was passed.
@@ -500,7 +498,7 @@ async fn run_push(
         .record_push(
             project,
             &config.identity.user,
-            summary.files_uploaded as u32,
+            (summary.files_uploaded + summary.files_skipped) as u32,
             summary.total_bytes,
         )
         .await
@@ -633,8 +631,7 @@ async fn run_unlock(
             .map_err(|e| AppError::Other(format!("prompt error: {}", e)))?;
 
         if !confirmed {
-            println!("Aborted.");
-            return Ok(());
+            return Err(AppError::UserAborted);
         }
     }
 

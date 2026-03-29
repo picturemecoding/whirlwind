@@ -123,7 +123,26 @@ async fn integration_push_pull_roundtrip() {
         .await
         .expect("push");
     assert_eq!(push_summary.files_uploaded, 2);
+    assert_eq!(push_summary.files_skipped, 0);
     println!("Pushed {} files", push_summary.files_uploaded);
+
+    // Second push with identical files — all should be skipped, none uploaded.
+    let push_summary2 = sync_engine
+        .push(project, src_dir.path())
+        .await
+        .expect("second push");
+    assert_eq!(
+        push_summary2.files_uploaded, 0,
+        "second push should upload nothing"
+    );
+    assert_eq!(
+        push_summary2.files_skipped, 2,
+        "second push should skip all unchanged files"
+    );
+    println!(
+        "Second push skipped {} unchanged files",
+        push_summary2.files_skipped
+    );
 
     // Pull to different dir
     let dst_dir = tempfile::tempdir().expect("tempdir");

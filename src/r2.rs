@@ -360,7 +360,7 @@ impl R2Client {
 // ---------------------------------------------------------------------------
 
 /// Compute the MD5 hex digest of `data`.
-fn compute_md5_hex(data: &[u8]) -> String {
+pub(crate) fn compute_md5_hex(data: &[u8]) -> String {
     let mut hasher = Md5::new();
     hasher.update(data);
     format!("{:x}", hasher.finalize())

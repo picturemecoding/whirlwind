@@ -1,5 +1,7 @@
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 
+use crate::sync::format_bytes;
+
 // ---------------------------------------------------------------------------
 // ProgressReporter
 // ---------------------------------------------------------------------------
@@ -38,8 +40,9 @@ impl ProgressReporter {
         pb.set_style(style);
 
         // Truncate the filename to 40 chars so the message column is stable.
-        let msg = if filename.len() > 40 {
-            filename[..40].to_string()
+        // Use char-count (not byte length) to avoid panicking on multi-byte UTF-8.
+        let msg: String = if filename.chars().count() > 40 {
+            filename.chars().take(40).collect()
         } else {
             filename.to_string()
         };
@@ -80,41 +83,12 @@ impl FileProgressBar {
 }
 
 // ---------------------------------------------------------------------------
-// Human-readable size helper
-//
-// Duplicated from sync.rs where it is private. If sync.rs's version is made
-// `pub` in a future cleanup, this copy can be removed in favour of
-// `crate::sync::format_bytes`.
-// ---------------------------------------------------------------------------
-
-pub fn format_bytes(bytes: u64) -> String {
-    if bytes < 1024 {
-        format!("{} B", bytes)
-    } else if bytes < 1024 * 1024 {
-        format!("{:.1} KB", bytes as f64 / 1024.0)
-    } else if bytes < 1024 * 1024 * 1024 {
-        format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
-    } else {
-        format!("{:.2} GB", bytes as f64 / (1024.0 * 1024.0 * 1024.0))
-    }
-}
-
-// ---------------------------------------------------------------------------
 // Unit tests
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn format_bytes_in_progress() {
-        assert_eq!(format_bytes(512), "512 B");
-        assert_eq!(format_bytes(1024), "1.0 KB");
-        assert_eq!(format_bytes(1536), "1.5 KB");
-        assert_eq!(format_bytes(1_048_576), "1.0 MB");
-        assert_eq!(format_bytes(1_073_741_824), "1.00 GB");
-    }
 
     #[test]
     fn file_progress_bar_finish_does_not_panic() {
@@ -135,5 +109,21 @@ mod tests {
         let long_name = "a".repeat(80);
         let bar = reporter.add_file_bar(&long_name, 1024);
         bar.finish(&long_name, 1024);
+    }
+
+    #[test]
+    fn add_file_bar_truncates_multibyte_utf8_filename() {
+        // Each '日' is 3 bytes; 45 repetitions = 45 chars = 135 bytes.
+        // Slicing by byte offset would panic; slicing by char count must not.
+        let reporter = ProgressReporter::new();
+        let long_name = "日".repeat(45);
+        assert!(long_name.len() > 40, "sanity: byte length exceeds 40");
+        assert!(
+            long_name.chars().count() > 40,
+            "sanity: char count exceeds 40"
+        );
+        let bar = reporter.add_file_bar(&long_name, 2048);
+        bar.update(2048);
+        bar.finish(&long_name, 2048);
     }
 }

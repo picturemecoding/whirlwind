@@ -46,25 +46,29 @@ impl Drop for LockGuard {
         let r2 = Arc::clone(&self.r2);
         let project = self.project.clone();
 
-        // Calling async code from a sync Drop context while inside a tokio
-        // runtime requires block_in_place so we don't block the async executor
-        // thread directly.
-        match tokio::runtime::Handle::try_current() {
-            Ok(handle) => {
-                let result = tokio::task::block_in_place(|| {
-                    handle.block_on(async move { r2.delete_object(&key).await })
+        // Spawn a fresh OS thread with its own current_thread Tokio runtime.
+        // This works on both current_thread and multi_thread runtimes — unlike
+        // block_in_place, which panics inside a current_thread runtime (e.g.
+        // the default #[tokio::test] runtime).
+        std::thread::spawn(move || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("tokio runtime")
+                .block_on(async move {
+                    if let Err(e) = r2.delete_object(&key).await {
+                        eprintln!(
+                            "\nERROR: failed to release lock for '{}': {}\n\
+                            Your collaborator may hit a LockContention error on their next session.\n\
+                            Run `whirlwind unlock {}` to release it manually.",
+                            project, e, project
+                        );
+                        std::process::exit(1);
+                    }
                 });
-                if let Err(e) = result {
-                    eprintln!("Warning: failed to release lock for {}: {}", project, e);
-                }
-            }
-            Err(_) => {
-                eprintln!(
-                    "Warning: failed to release lock for {}: tokio runtime not available",
-                    project
-                );
-            }
-        }
+        })
+        .join()
+        .ok();
     }
 }
 
