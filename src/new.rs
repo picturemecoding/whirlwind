@@ -19,7 +19,7 @@ use crate::{
 
 /// Parse `--assign track=file` pairs into a filename→track map.
 ///
-/// Entries that do not contain `=` are silently skipped with a warning.
+/// Entries that do not contain `=` are silently skipped.
 fn parse_assign(assigns: &[String]) -> HashMap<String, String> {
     assigns
         .iter()
@@ -56,6 +56,9 @@ fn resolve_track<'a>(
 }
 
 const AUDIO_EXTENSIONS: &[&str] = &["wav", "aiff", "mp3", "flac", "ogg"];
+
+/// How many seconds before the intro ends the mic tracks should start.
+const MIC_TRACK_LEAD_IN_SECS: f64 = 2.0;
 
 /// Read the duration (in seconds) for non-WAV audio files using the symphonia crate.
 /// Returns 0.0 if the duration cannot be determined.
@@ -200,11 +203,17 @@ pub async fn run_new(
         .or_else(|| config.new.as_ref().and_then(|n| n.default_template.clone()))
         .unwrap_or_else(|| "default".to_string());
 
-    let template_key = R2Client::template_key(&resolved_template);
+    // Template extensions may be .RPP or .rpp depending on how the user uploaded it, so we'll try both.
+    let template_upper_ext = R2Client::template_key(&resolved_template, true);
+    let template_lower_ext = R2Client::template_key(&resolved_template, false);
+
+    // Local paths.
     let local_dir = config.local.working_dir.join(episode);
     let rpp_path = local_dir.join(format!("{}.rpp", episode));
 
+    // CLI assignments look like `--assign track-name=file.wav` and take priority over config patterns.
     let assign_map = parse_assign(&assign);
+    // Configured tracks from `[[new.tracks]]` in the config file; we fallback to these.
     let config_tracks = config
         .new
         .as_ref()
@@ -214,7 +223,7 @@ pub async fn run_new(
     // Dry run: display plan without any network or filesystem side effects.
     if dry_run {
         println!("Dry run: whirlwind new {}", episode);
-        println!("  Template: {} (from R2)", template_key);
+        println!("  Template: {} (from R2)", template_upper_ext);
         println!();
 
         if local_dir.exists() {
@@ -248,7 +257,7 @@ pub async fn run_new(
                 fmt_duration(project_end)
             );
             println!(
-                "  Outro starts 3s before end! = {}",
+                "  Outro-only starts 3s before end = {}",
                 fmt_duration((project_end - 3.0).max(0.0))
             );
         } else {
@@ -265,26 +274,25 @@ pub async fn run_new(
 
     // Download template .rpp from R2.
     // Reaper saves files as `.RPP` (uppercase) by default, but users may also
-    // upload as `.rpp`. Try lowercase first, then uppercase on 404.
+    // upload as `.rpp`. Try uppercase first, then lowercase on 404.
     let template_bytes = {
-        let lower_key = R2Client::template_key(&resolved_template);
-        let upper_key = format!("templates/{}.RPP", resolved_template);
-        match r2.get_object_bytes(&lower_key).await {
+        match r2.get_object_bytes(&template_upper_ext).await {
             Ok(b) => b,
-            Err(AppError::NotFound { .. }) => {
-                r2.get_object_bytes(&upper_key).await.map_err(|e| {
+            Err(AppError::NotFound { .. }) => r2
+                .get_object_bytes(&template_lower_ext)
+                .await
+                .map_err(|e| {
                     if matches!(e, AppError::NotFound { .. }) {
                         AppError::Other(format!(
                             "Template '{}' not found in R2. Upload it with:\n  \
                             aws s3 cp your-template.rpp s3://{}/{} \\\n  \
                             --endpoint-url https://<account_id>.r2.cloudflarestorage.com",
-                            resolved_template, r2.bucket, lower_key,
+                            resolved_template, r2.bucket, template_lower_ext,
                         ))
                     } else {
                         e
                     }
-                })?
-            }
+                })?,
             Err(e) => return Err(e),
         }
     };
@@ -307,13 +315,32 @@ pub async fn run_new(
     // Discover audio files and build the .rpp.
     let audio_files = discover_audio_files(&local_dir)?;
 
+    // Compute mic track start: intro_length - MIC_TRACK_LEAD_IN_SECS.
+    let intro_length = project::get_track_item_length(&template_str, "intro-only");
+    if intro_length == 0.0 {
+        eprintln!(
+            "Warning: intro-only track not found in template — mic tracks will start at position 0"
+        );
+    }
+    let mic_start = (intro_length - MIC_TRACK_LEAD_IN_SECS).max(0.0);
+
+    // Rewrite intro/outro FILE paths to absolute paths under working_dir/Media/.
+    let media_dir = config.local.working_dir.join("Media");
+    let intro_abs = media_dir.join("intro-only.wav");
+    let outro_abs = media_dir.join("outro-only.wav");
+    let intro_abs_str = intro_abs.to_string_lossy().into_owned();
+    let outro_abs_str = outro_abs.to_string_lossy().into_owned();
+
+    // actuall rpp project is loaded as a string here.
     let mut rpp = template_str.clone();
+    rpp = project::set_source_file(&rpp, "intro-only", &intro_abs_str);
+    rpp = project::set_source_file(&rpp, "outro-only", &outro_abs_str);
     let mut plain_tracks = Vec::new();
 
     for (filename, duration) in &audio_files {
         match resolve_track(filename, &assign_map, config_tracks) {
             Some(track) => {
-                let updated = project::set_track_item(&rpp, track, filename, *duration);
+                let updated = project::set_track_item(&rpp, track, filename, *duration, mic_start);
                 if updated != rpp {
                     println!("  {} → track: {}", filename, track);
                     rpp = updated;
@@ -342,7 +369,7 @@ pub async fn run_new(
     let project_end = max_duration - resolved_trim;
 
     let rpp = project::insert_tracks(&rpp, &plain_tracks);
-    let rpp = project::set_item_position(&rpp, "outro", (project_end - 3.0).max(0.0));
+    let rpp = project::set_item_position(&rpp, "outro-only", (project_end - 3.0).max(0.0));
     let rpp = project::set_end_marker(&rpp, project_end);
 
     // Write the .rpp file.
@@ -469,7 +496,7 @@ mod tests {
     #[test]
     fn match_track_config_returns_correct_track_for_erik() {
         let tracks = erik_mike_tracks();
-        let result = match_track_config("riverside_erik_aker_raw-audio_ep42.wav", &tracks);
+        let result = match_track_config("riverside_erik_aker_raw-audio_0242.wav", &tracks);
         assert!(result.is_some());
         assert_eq!(result.unwrap().track, "erik");
     }
@@ -477,7 +504,10 @@ mod tests {
     #[test]
     fn match_track_config_returns_correct_track_for_mike() {
         let tracks = erik_mike_tracks();
-        let result = match_track_config("riverside_mike_cohost_raw-audio_ep42.wav", &tracks);
+        let result = match_track_config(
+            "riverside_mike_the cohost_raw-audio_picture_me coding_0242.wav",
+            &tracks,
+        );
         assert!(result.is_some());
         assert_eq!(result.unwrap().track, "mike");
     }

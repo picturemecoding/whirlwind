@@ -62,8 +62,12 @@ impl R2Client {
         format!("locks/{}.lock", project)
     }
 
-    pub fn template_key(template_name: &str) -> String {
-        format!("templates/{}.rpp", template_name)
+    pub fn template_key(template_name: &str, uppercase: bool) -> String {
+        if uppercase {
+            format!("templates/{}.RPP", template_name)
+        } else {
+            format!("templates/{}.rpp", template_name)
+        }
     }
 
     // -----------------------------------------------------------------------

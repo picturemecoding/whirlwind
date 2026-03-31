@@ -15,7 +15,7 @@ fn closes_block(line: &str) -> bool {
 }
 
 /// Build the `<ITEM>` text to insert into a named track.
-fn item_block(file_path: &str, duration_secs: f64) -> String {
+fn item_block(file_path: &str, duration_secs: f64, position_secs: f64) -> String {
     let iguid = format!("{{{}}}", Uuid::new_v4().to_string().to_uppercase());
     let guid = format!("{{{}}}", Uuid::new_v4().to_string().to_uppercase());
     let name = std::path::Path::new(file_path)
@@ -23,7 +23,7 @@ fn item_block(file_path: &str, duration_secs: f64) -> String {
         .and_then(|s| s.to_str())
         .unwrap_or(file_path);
     format!(
-        "    <ITEM\n      POSITION 0\n      SNAPOFFS 0\n      LENGTH {duration_secs}\n      LOOP 0\n      ALLTAKES 0\n      FADEIN 1 0 0 1 0 0 0\n      FADEOUT 1 0 0 1 0 0 0\n      MUTE 0 0\n      SEL 0\n      IGUID {iguid}\n      IID 1\n      NAME {name}\n      VOLPAN 1 0 1 -1\n      SOFFS 0\n      PLAYRATE 1 1 0 -1 0 0.0025\n      CHANMODE 0\n      GUID {guid}\n      <SOURCE WAVE\n        FILE \"{file_path}\"\n      >\n    >"
+        "    <ITEM\n      POSITION {position_secs}\n      SNAPOFFS 0\n      LENGTH {duration_secs}\n      LOOP 0\n      ALLTAKES 0\n      FADEIN 1 0 0 1 0 0 0\n      FADEOUT 1 0 0 1 0 0 0\n      MUTE 0 0\n      SEL 0\n      IGUID {iguid}\n      IID 1\n      NAME {name}\n      VOLPAN 1 0 1 -1\n      SOFFS 0\n      PLAYRATE 1 1 0 -1 0 0.0025\n      CHANMODE 0\n      GUID {guid}\n      <SOURCE WAVE\n        FILE \"{file_path}\"\n      >\n    >"
     )
 }
 
@@ -189,7 +189,13 @@ fn track_has_name(lines: &[&str], track_start: usize, track_end: usize, track_na
 /// - If the track has no existing `<ITEM>`, inserts one before the track's closing `>`.
 /// - If the track already has an `<ITEM>` (e.g. a placeholder), replaces it.
 /// - Returns the string unchanged if the named track is not found.
-pub fn set_track_item(rpp: &str, track_name: &str, file_path: &str, duration_secs: f64) -> String {
+pub fn set_track_item(
+    rpp: &str,
+    track_name: &str,
+    file_path: &str,
+    duration_secs: f64,
+    position_secs: f64,
+) -> String {
     let lines: Vec<&str> = rpp.lines().collect();
     let n = lines.len();
     let mut out: Vec<String> = Vec::with_capacity(n + 20);
@@ -214,7 +220,7 @@ pub fn set_track_item(rpp: &str, track_name: &str, file_path: &str, duration_sec
                     out.push((*line).to_string());
                 }
                 // Insert new <ITEM> block before the closing >.
-                let item = item_block(file_path, duration_secs);
+                let item = item_block(file_path, duration_secs, position_secs);
                 for item_line in item.lines() {
                     out.push(item_line.to_string());
                 }
@@ -381,6 +387,107 @@ pub fn set_end_marker(rpp: &str, end_secs: f64) -> String {
     result
 }
 
+/// Replace the `FILE "..."` path inside the `<SOURCE WAVE>` block of the first
+/// `<ITEM>` in a named track.
+///
+/// Returns the string unchanged if the named track is not found or has no ITEM.
+pub fn set_source_file(rpp: &str, track_name: &str, file_path: &str) -> String {
+    let lines: Vec<&str> = rpp.lines().collect();
+    let n = lines.len();
+    let mut out: Vec<String> = lines.iter().map(|s| s.to_string()).collect();
+    let mut i = 0;
+
+    while i < n {
+        let line = lines[i];
+        if line.trim_start().starts_with("<TRACK") {
+            let track_end = find_block_end(&lines, i);
+            if track_has_name(&lines, i, track_end, track_name) {
+                if let Some((item_start, item_end)) = find_direct_item(&lines, i, track_end) {
+                    // Find <SOURCE block inside the ITEM.
+                    let mut source_found = false;
+                    let mut j = item_start + 1;
+                    while j < item_end {
+                        if lines[j].trim().starts_with("<SOURCE") {
+                            source_found = true;
+                            let source_end = find_block_end(&lines, j);
+                            // Replace FILE line inside <SOURCE>.
+                            let mut file_found = false;
+                            for k in (j + 1)..source_end {
+                                if k >= n {
+                                    break;
+                                }
+                                let sl = lines[k];
+                                if sl.trim().starts_with("FILE ") {
+                                    let indent = &sl[..sl.len() - sl.trim_start().len()];
+                                    out[k] = format!("{indent}FILE \"{file_path}\"");
+                                    file_found = true;
+                                    break;
+                                }
+                            }
+                            if !file_found {
+                                eprintln!(
+                                    "Warning: set_source_file: no FILE line found in <SOURCE> for track '{track_name}'"
+                                );
+                            }
+                            break;
+                        }
+                        j += 1;
+                    }
+                    if !source_found {
+                        eprintln!(
+                            "Warning: set_source_file: no <SOURCE> block found in <ITEM> for track '{track_name}'"
+                        );
+                    }
+                }
+                i = track_end + 1;
+            } else {
+                i = track_end + 1;
+            }
+        } else {
+            i += 1;
+        }
+    }
+
+    let mut result = out.join("\n");
+    if rpp.ends_with('\n') {
+        result.push('\n');
+    }
+    result
+}
+
+/// Return the LENGTH (in seconds) of the first `<ITEM>` in the named track.
+///
+/// Returns `0.0` if the track or item is not found or the LENGTH cannot be parsed.
+pub fn get_track_item_length(rpp: &str, track_name: &str) -> f64 {
+    let lines: Vec<&str> = rpp.lines().collect();
+    let n = lines.len();
+    let mut i = 0;
+
+    while i < n {
+        let line = lines[i];
+        if line.trim_start().starts_with("<TRACK") {
+            let track_end = find_block_end(&lines, i);
+            if track_has_name(&lines, i, track_end, track_name) {
+                if let Some((item_start, item_end)) = find_direct_item(&lines, i, track_end) {
+                    for line in lines.iter().take(item_end + 1).skip(item_start + 1) {
+                        if let Some(rest) = line.trim().strip_prefix("LENGTH ") {
+                            return rest.parse::<f64>().unwrap_or(0.0);
+                        }
+                    }
+                }
+                eprintln!(
+                    "Warning: get_track_item_length: no LENGTH found for track '{track_name}'"
+                );
+                return 0.0;
+            }
+            i = track_end + 1;
+        } else {
+            i += 1;
+        }
+    }
+    0.0
+}
+
 /// Build a plain `<TRACK>` block (no FX chain) for an unmatched audio file.
 ///
 /// The track name is derived from the filename stem. The GUID is a fresh UUID v4.
@@ -426,7 +533,7 @@ mod tests {
   >
 >
 >"#;
-        let result = set_track_item(rpp, "erik", "audio/erik-ep42.wav", 3612.5);
+        let result = set_track_item(rpp, "erik", "audio/erik-ep42.wav", 3612.5, 0.0);
         assert!(
             result.contains(r#"FILE "audio/erik-ep42.wav""#),
             "FILE path missing:\n{result}"
@@ -448,7 +555,7 @@ mod tests {
   NAME "other-track"
 >
 >"#;
-        let result = set_track_item(rpp, "erik", "audio/erik-ep42.wav", 3612.5);
+        let result = set_track_item(rpp, "erik", "audio/erik-ep42.wav", 3612.5, 0.0);
         assert_eq!(result, rpp, "Should return input unchanged");
     }
 
@@ -470,7 +577,7 @@ mod tests {
 >
 >"#;
         // Track has a placeholder <ITEM> — set_track_item must replace it.
-        let result = set_track_item(rpp, "mike", "audio/ep42-mike.wav", 3600.0);
+        let result = set_track_item(rpp, "mike", "audio/ep42-mike.wav", 3600.0, 0.0);
         assert!(
             result.contains(r#"FILE "audio/ep42-mike.wav""#),
             "New FILE must appear:\n{result}"
@@ -502,7 +609,7 @@ mod tests {
   NAME "erik-mic"
 >
 >"#;
-        let result = set_track_item(rpp, "erik", "audio/erik.wav", 100.0);
+        let result = set_track_item(rpp, "erik", "audio/erik.wav", 100.0, 0.0);
         assert_eq!(
             result, rpp,
             "Should not match 'erik-mic' when searching for 'erik'"
@@ -517,7 +624,7 @@ mod tests {
   NAME erik
 >
 >"#;
-        let result = set_track_item(rpp, "erik", "audio/ep42-erik.wav", 3600.0);
+        let result = set_track_item(rpp, "erik", "audio/ep42-erik.wav", 3600.0, 0.0);
         assert!(
             result.contains(r#"FILE "audio/ep42-erik.wav""#),
             "Should insert into unquoted-name track:\n{result}"

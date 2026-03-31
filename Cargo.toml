@@ -25,6 +25,10 @@ path = "tests/spike_r2_conditional_put.rs"
 name = "integration_test"
 path = "tests/integration_test.rs"
 
+[[test]]
+name = "rpp_parsing_test"
+path = "tests/rpp_parsing_test.rs"
+
 [dependencies]
 aws-sdk-s3 = { version = "1", features = [] }
 aws-config = { version = "1", features = ["behavior-version-latest"] }
