@@ -37,6 +37,12 @@ pub enum AppError {
     #[error("not found in R2: {key}")]
     NotFound { key: String },
 
+    // Episode already exists
+    #[error(
+        "Episode '{episode}' already exists in R2. Use 'whirlwind pull {episode}' to download it instead."
+    )]
+    EpisodeAlreadyExists { episode: String },
+
     // Sync errors
     #[error("Download failed for {path}: {source}")]
     DownloadFailed {
@@ -177,5 +183,22 @@ mod tests {
             .exit_code(),
             1
         );
+    }
+
+    #[test]
+    fn episode_already_exists_message_contains_episode_and_pull_hint() {
+        let err = AppError::EpisodeAlreadyExists {
+            episode: "ep-47".to_string(),
+        };
+        let msg = err.to_string();
+        assert!(
+            msg.contains("ep-47"),
+            "expected episode name in message: {msg}"
+        );
+        assert!(
+            msg.contains("whirlwind pull ep-47"),
+            "expected pull hint in message: {msg}"
+        );
+        assert_eq!(err.exit_code(), 1);
     }
 }

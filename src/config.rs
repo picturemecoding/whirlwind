@@ -11,6 +11,8 @@ pub struct Config {
     pub identity: IdentityConfig,
     #[serde(default)]
     pub new: Option<NewConfig>,
+    #[serde(default)]
+    pub transfer: TransferConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -26,6 +28,35 @@ pub struct NewConfig {
     pub trim_seconds: f64,
     #[serde(default)]
     pub tracks: Vec<TrackConfig>,
+    pub intro_file: Option<PathBuf>,
+    pub outro_file: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TransferConfig {
+    #[serde(default = "TransferConfig::default_retry_count")]
+    pub retry_count: u32,
+    #[serde(default = "TransferConfig::default_timeout_secs")]
+    pub timeout_secs: u64,
+}
+
+impl TransferConfig {
+    fn default_retry_count() -> u32 {
+        3
+    }
+
+    fn default_timeout_secs() -> u64 {
+        60
+    }
+}
+
+impl Default for TransferConfig {
+    fn default() -> Self {
+        Self {
+            retry_count: Self::default_retry_count(),
+            timeout_secs: Self::default_timeout_secs(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -203,6 +234,7 @@ mod tests {
                 machine: "alice-macbook".to_string(),
             },
             new: None,
+            transfer: TransferConfig::default(),
         }
     }
 

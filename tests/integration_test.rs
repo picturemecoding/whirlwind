@@ -17,7 +17,7 @@
 //!   cargo test --test integration_test -- --nocapture
 
 use pmc_whirlwind::{
-    config::{Config, IdentityConfig, LocalConfig, R2Config, ReaperConfig},
+    config::{Config, IdentityConfig, LocalConfig, R2Config, ReaperConfig, TransferConfig},
     error::AppError,
     lock::LockManager,
     r2::R2Client,
@@ -47,6 +47,7 @@ fn test_config() -> Option<Config> {
             machine: "test-machine".to_string(),
         },
         new: None,
+        transfer: TransferConfig::default(),
     })
 }
 

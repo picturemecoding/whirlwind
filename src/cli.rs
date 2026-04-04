@@ -42,6 +42,14 @@ pub enum Commands {
         #[arg(long)]
         force: bool,
     },
+    /// Generate a presigned share URL for the most recent mix file in the episode directory.
+    /// The URL is valid for --days days (default: 7, max: 7 — Cloudflare R2 limit).
+    Share {
+        episode: String,
+        /// Number of days the URL remains valid (1–7, default 7)
+        #[arg(long)]
+        days: Option<u8>,
+    },
     /// Create a new episode project from a Reaper template
     New {
         /// Episode name; a directory under working_dir will be created if needed,

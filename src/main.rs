@@ -100,6 +100,14 @@ async fn main() {
             }
         }
 
+        Commands::Share { episode, days } => {
+            let (_config, r2) = load_config_and_r2().await;
+            if let Err(e) = run_share(&episode, days, &r2).await {
+                eprintln!("{}", e);
+                process::exit(e.exit_code());
+            }
+        }
+
         Commands::New {
             episode,
             template,
@@ -233,6 +241,47 @@ async fn run_init() -> Result<(), AppError> {
         .interact_text()
         .map_err(|e| AppError::Other(format!("prompt error: {}", e)))?;
 
+    // Collect optional intro/outro WAV paths.
+    let intro_file_str: String = Input::new()
+        .with_prompt(
+            "Intro WAV absolute path (leave blank to use working_dir/Media/intro-only.wav): ",
+        )
+        .allow_empty(true)
+        .interact_text()
+        .map_err(|e| AppError::Other(format!("prompt error: {}", e)))?;
+
+    let outro_file_str: String = Input::new()
+        .with_prompt(
+            "Outro WAV absolute path (leave blank to use working_dir/Media/outro-only.wav): ",
+        )
+        .allow_empty(true)
+        .interact_text()
+        .map_err(|e| AppError::Other(format!("prompt error: {}", e)))?;
+
+    let new_config = {
+        let intro = if intro_file_str.is_empty() {
+            None
+        } else {
+            Some(std::path::PathBuf::from(&intro_file_str))
+        };
+        let outro = if outro_file_str.is_empty() {
+            None
+        } else {
+            Some(std::path::PathBuf::from(&outro_file_str))
+        };
+        if intro.is_some() || outro.is_some() {
+            Some(pmc_whirlwind::config::NewConfig {
+                default_template: None,
+                trim_seconds: 0.0,
+                tracks: Vec::new(),
+                intro_file: intro,
+                outro_file: outro,
+            })
+        } else {
+            None
+        }
+    };
+
     // Build and validate config.
     let config = Config {
         r2: pmc_whirlwind::config::R2Config {
@@ -248,7 +297,8 @@ async fn run_init() -> Result<(), AppError> {
             binary_path: std::path::PathBuf::from(&reaper_binary_str),
         },
         identity: pmc_whirlwind::config::IdentityConfig { user, machine },
-        new: None,
+        new: new_config,
+        transfer: pmc_whirlwind::config::TransferConfig::default(),
     };
 
     config.validate()?;
@@ -664,6 +714,62 @@ async fn run_unlock(
 
     r2.delete_object(&lock_key).await?;
     println!("Lock released for '{}'.", project);
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// share handler
+// ---------------------------------------------------------------------------
+
+async fn run_share(episode: &str, days: Option<u8>, r2: &R2Client) -> Result<(), AppError> {
+    let days_valid = days.unwrap_or(7);
+    if days_valid == 0 || days_valid > 7 {
+        return Err(AppError::Other(format!(
+            "--days must be between 1 and 7 (Cloudflare R2 presigned URLs expire in at most 7 days); got {}",
+            days_valid
+        )));
+    }
+    let seconds_valid = (days_valid as u64) * 24 * 3600;
+
+    let prefix = R2Client::project_prefix(episode);
+    let objects = r2.list_objects(&prefix).await?;
+
+    if objects.is_empty() {
+        return Err(AppError::Other(format!(
+            "Episode '{}' not found in R2.",
+            episode
+        )));
+    }
+
+    // Filter: key contains "mix" (case-insensitive) and ends with ".wav".
+    let mut mix_files: Vec<_> = objects
+        .iter()
+        .filter(|obj| {
+            let key_lower = obj.key.to_lowercase();
+            key_lower.contains("mix") && key_lower.ends_with(".wav")
+        })
+        .collect();
+
+    if mix_files.is_empty() {
+        return Err(AppError::Other(format!(
+            "No mix file found in '{}'. Expected a file matching *mix*.wav.",
+            episode
+        )));
+    }
+
+    // Sort by last_modified descending; take the most recent.
+    mix_files.sort_by(|a, b| b.last_modified.cmp(&a.last_modified));
+    let most_recent = mix_files[0];
+
+    // Reconstruct the full key (list_objects strips the prefix).
+    let full_key = format!("{}{}", prefix, most_recent.key);
+
+    let url = r2
+        .presign_get_object(&full_key, std::time::Duration::from_secs(seconds_valid))
+        .await?;
+
+    println!("{}", url);
 
     Ok(())
 }

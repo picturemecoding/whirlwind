@@ -220,6 +220,16 @@ pub async fn run_new(
         .map(|n| n.tracks.as_slice())
         .unwrap_or(&[]);
 
+    // Overwrite guard: check whether the episode already exists in R2.
+    // This must happen before any local filesystem or lock operations.
+    let episode_prefix = R2Client::project_prefix(episode);
+    let existing_objects = r2.list_objects(&episode_prefix).await?;
+    if !existing_objects.is_empty() {
+        return Err(AppError::EpisodeAlreadyExists {
+            episode: episode.to_string(),
+        });
+    }
+
     // Dry run: display plan without any network or filesystem side effects.
     if dry_run {
         println!("Dry run: whirlwind new {}", episode);
@@ -324,10 +334,19 @@ pub async fn run_new(
     }
     let mic_start = (intro_length - MIC_TRACK_LEAD_IN_SECS).max(0.0);
 
-    // Rewrite intro/outro FILE paths to absolute paths under working_dir/Media/.
+    // Rewrite intro/outro FILE paths to absolute paths.
+    // Priority: explicit config.new.intro_file / outro_file → fallback to working_dir/Media/.
     let media_dir = config.local.working_dir.join("Media");
-    let intro_abs = media_dir.join("intro-only.wav");
-    let outro_abs = media_dir.join("outro-only.wav");
+    let intro_abs = config
+        .new
+        .as_ref()
+        .and_then(|n| n.intro_file.clone())
+        .unwrap_or_else(|| media_dir.join("intro-only.wav"));
+    let outro_abs = config
+        .new
+        .as_ref()
+        .and_then(|n| n.outro_file.clone())
+        .unwrap_or_else(|| media_dir.join("outro-only.wav"));
     let intro_abs_str = intro_abs.to_string_lossy().into_owned();
     let outro_abs_str = outro_abs.to_string_lossy().into_owned();
 

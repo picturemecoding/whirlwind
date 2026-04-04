@@ -1,13 +1,18 @@
+use std::future::Future;
+use std::time::Duration;
+
 use aws_config::BehaviorVersion;
 use aws_credential_types::Credentials;
 use aws_sdk_s3::{
     config::{Builder, Region},
+    presigning::PresigningConfig,
     primitives::ByteStream,
 };
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
 use md5::{Digest, Md5};
 
+use crate::config::TransferConfig;
 use crate::error::AppError;
 
 // ---------------------------------------------------------------------------
@@ -48,6 +53,7 @@ pub enum AcquireResult {
 pub struct R2Client {
     client: aws_sdk_s3::Client,
     pub bucket: String,
+    transfer: TransferConfig,
 }
 
 impl R2Client {
@@ -101,6 +107,7 @@ impl R2Client {
         Ok(Self {
             client,
             bucket: config.r2.bucket.clone(),
+            transfer: config.transfer.clone(),
         })
     }
 
@@ -180,48 +187,57 @@ impl R2Client {
     /// Download an object and return its body as `Bytes`.
     ///
     /// Maps HTTP 404 / NoSuchKey to `AppError::NotFound`; all other SDK errors
-    /// to `AppError::DownloadFailed`.
+    /// to `AppError::DownloadFailed`. Retries transient failures up to
+    /// `config.transfer.retry_count` times with exponential backoff.
     pub async fn get_object_bytes(&self, key: &str) -> Result<Bytes, AppError> {
-        let result = self
-            .client
-            .get_object()
-            .bucket(&self.bucket)
-            .key(key)
-            .send()
-            .await;
+        let op_name = key.rsplit('/').next().unwrap_or(key).to_string();
+        let max_retries = self.transfer.retry_count;
+        let initial_delay = Duration::from_secs(1);
+        let timeout = Duration::from_secs(self.transfer.timeout_secs);
 
-        let resp = match result {
-            Ok(r) => r,
-            Err(sdk_err) => {
-                let http_status = sdk_err.raw_response().map(|r| r.status().as_u16());
-                if matches!(http_status, Some(404)) {
-                    return Err(AppError::NotFound {
-                        key: key.to_string(),
+        retry_with_backoff(&op_name, max_retries, initial_delay, timeout, || async {
+            let result = self
+                .client
+                .get_object()
+                .bucket(&self.bucket)
+                .key(key)
+                .send()
+                .await;
+
+            let resp = match result {
+                Ok(r) => r,
+                Err(sdk_err) => {
+                    let http_status = sdk_err.raw_response().map(|r| r.status().as_u16());
+                    if matches!(http_status, Some(404)) {
+                        return Err(AppError::NotFound {
+                            key: key.to_string(),
+                        });
+                    }
+                    let debug = format!("{:?}", sdk_err);
+                    if debug.contains("NoSuchKey") {
+                        return Err(AppError::NotFound {
+                            key: key.to_string(),
+                        });
+                    }
+                    return Err(AppError::DownloadFailed {
+                        path: key.to_string(),
+                        source: Box::new(sdk_err),
                     });
                 }
-                let debug = format!("{:?}", sdk_err);
-                if debug.contains("NoSuchKey") {
-                    return Err(AppError::NotFound {
-                        key: key.to_string(),
-                    });
-                }
-                return Err(AppError::DownloadFailed {
+            };
+
+            let body = resp
+                .body
+                .collect()
+                .await
+                .map_err(|e| AppError::DownloadFailed {
                     path: key.to_string(),
-                    source: Box::new(sdk_err),
-                });
-            }
-        };
+                    source: Box::new(e),
+                })?;
 
-        let body = resp
-            .body
-            .collect()
-            .await
-            .map_err(|e| AppError::DownloadFailed {
-                path: key.to_string(),
-                source: Box::new(e),
-            })?;
-
-        Ok(body.into_bytes())
+            Ok(body.into_bytes())
+        })
+        .await
     }
 
     /// Unconditional PUT — overwrite or create the object at `key`.
@@ -229,24 +245,32 @@ impl R2Client {
     /// Computes the MD5 of `body` and attaches it as custom metadata under
     /// the key `"content-md5"` (stored by R2/S3 as `x-amz-meta-content-md5`).
     ///
-    /// Maps SDK errors to `AppError::UploadFailed`.
+    /// Maps SDK errors to `AppError::UploadFailed`. Retries transient failures
+    /// up to `config.transfer.retry_count` times with exponential backoff.
     pub async fn put_object(&self, key: &str, body: Vec<u8>) -> Result<(), AppError> {
         let md5_hex = compute_md5_hex(&body);
+        let op_name = key.rsplit('/').next().unwrap_or(key).to_string();
+        let max_retries = self.transfer.retry_count;
+        let initial_delay = Duration::from_secs(1);
+        let timeout = Duration::from_secs(self.transfer.timeout_secs);
 
-        self.client
-            .put_object()
-            .bucket(&self.bucket)
-            .key(key)
-            .metadata("content-md5", &md5_hex)
-            .body(ByteStream::from(body))
-            .send()
-            .await
-            .map_err(|e| AppError::UploadFailed {
-                path: key.to_string(),
-                source: Box::new(e),
-            })?;
+        retry_with_backoff(&op_name, max_retries, initial_delay, timeout, || async {
+            self.client
+                .put_object()
+                .bucket(&self.bucket)
+                .key(key)
+                .metadata("content-md5", &md5_hex)
+                .body(ByteStream::from(body.clone()))
+                .send()
+                .await
+                .map_err(|e| AppError::UploadFailed {
+                    path: key.to_string(),
+                    source: Box::new(e),
+                })?;
 
-        Ok(())
+            Ok(())
+        })
+        .await
     }
 
     /// Conditional PUT with `If-None-Match: *`.
@@ -335,6 +359,35 @@ impl R2Client {
         }
     }
 
+    /// Generate a presigned GET URL for the object at `key`.
+    ///
+    /// The URL is valid for `expires_in` from the time this method is called.
+    /// Returns the URL as a `String` that is ready to be shared or printed.
+    pub async fn presign_get_object(
+        &self,
+        key: &str,
+        expires_in: Duration,
+    ) -> Result<String, AppError> {
+        let presigning_config = PresigningConfig::expires_in(expires_in)
+            .map_err(|e| AppError::R2Error(format!("invalid presigning duration: {}", e)))?;
+
+        let presigned = self
+            .client
+            .get_object()
+            .bucket(&self.bucket)
+            .key(key)
+            .presigned(presigning_config)
+            .await
+            .map_err(|e| {
+                AppError::R2Error(format!(
+                    "presign_get_object failed for key '{}': {}",
+                    key, e
+                ))
+            })?;
+
+        Ok(presigned.uri().to_string())
+    }
+
     /// HEAD the object at `key`.
     ///
     /// - Returns `None` when the object does not exist (404 / NoSuchKey / NotFound).
@@ -385,6 +438,60 @@ impl R2Client {
 // ---------------------------------------------------------------------------
 // Private helpers
 // ---------------------------------------------------------------------------
+
+/// Retry a fallible async operation with exponential backoff.
+///
+/// - Attempts the operation up to `max_retries + 1` times total.
+/// - On each retry (not the first attempt), prints a message to stderr and
+///   waits an exponentially increasing delay, starting at `initial_delay`,
+///   doubling each attempt, capped at 30 seconds.
+/// - Returns the first `Ok` result, or the last `Err` after all retries
+///   are exhausted.
+///
+/// This function is intentionally NOT used by `put_object_if_not_exists`
+/// because a 412 response is a deliberate lock-contention signal, not a
+/// transient failure.
+async fn retry_with_backoff<F, Fut, T>(
+    op_name: &str,
+    max_retries: u32,
+    initial_delay: Duration,
+    timeout: Duration,
+    mut operation: F,
+) -> Result<T, AppError>
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = Result<T, AppError>>,
+{
+    const MAX_DELAY: Duration = Duration::from_secs(30);
+
+    let mut last_err = None;
+    for attempt in 0..=max_retries {
+        if attempt > 0 {
+            let delay = initial_delay
+                .saturating_mul(1u32.checked_shl(attempt - 1).unwrap_or(u32::MAX))
+                .min(MAX_DELAY);
+            eprintln!(
+                "Retrying {} (attempt {}/{})...",
+                op_name, attempt, max_retries
+            );
+            tokio::time::sleep(delay).await;
+        }
+
+        match tokio::time::timeout(timeout, operation()).await {
+            Ok(Ok(value)) => return Ok(value),
+            Ok(Err(err)) => last_err = Some(err),
+            Err(_elapsed) => {
+                last_err = Some(AppError::Other(format!(
+                    "{} timed out after {}s",
+                    op_name,
+                    timeout.as_secs()
+                )));
+            }
+        }
+    }
+
+    Err(last_err.expect("loop always runs at least once"))
+}
 
 /// Compute the MD5 hex digest of `data`.
 pub(crate) fn compute_md5_hex(data: &[u8]) -> String {
@@ -454,6 +561,136 @@ mod tests {
         assert_eq!(
             compute_md5_hex(b"hello"),
             "5d41402abc4b2a76b9719d911017c592"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // retry_with_backoff tests
+    // -----------------------------------------------------------------------
+
+    /// A successful operation on the first attempt is returned immediately
+    /// without any retries.
+    #[tokio::test]
+    async fn retry_succeeds_on_first_attempt() {
+        let call_count = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let cc = call_count.clone();
+
+        let result = retry_with_backoff(
+            "test-op",
+            3,
+            Duration::from_millis(1),
+            Duration::from_secs(60),
+            || {
+                let cc = cc.clone();
+                async move {
+                    cc.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    Ok::<u32, AppError>(42)
+                }
+            },
+        )
+        .await;
+
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), 42);
+        assert_eq!(
+            call_count.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "expected exactly one attempt"
+        );
+    }
+
+    /// An operation that always fails is retried `max_retries` times and then
+    /// returns the final error.
+    #[tokio::test]
+    async fn retry_exhausts_all_attempts_on_persistent_failure() {
+        let call_count = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let cc = call_count.clone();
+
+        let result = retry_with_backoff(
+            "test-op",
+            2,
+            Duration::from_millis(1),
+            Duration::from_secs(60),
+            || {
+                let cc = cc.clone();
+                async move {
+                    cc.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    Err::<u32, AppError>(AppError::Other("transient".to_string()))
+                }
+            },
+        )
+        .await;
+
+        assert!(result.is_err());
+        // max_retries=2 means 3 total attempts: initial + 2 retries
+        assert_eq!(
+            call_count.load(std::sync::atomic::Ordering::SeqCst),
+            3,
+            "expected 3 total attempts (initial + 2 retries)"
+        );
+    }
+
+    /// An operation that fails on the first two attempts but succeeds on the
+    /// third is returned as Ok.
+    #[tokio::test]
+    async fn retry_succeeds_on_third_attempt() {
+        let call_count = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let cc = call_count.clone();
+
+        let result = retry_with_backoff(
+            "test-op",
+            3,
+            Duration::from_millis(1),
+            Duration::from_secs(60),
+            || {
+                let cc = cc.clone();
+                async move {
+                    let n = cc.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    if n < 2 {
+                        Err(AppError::Other("transient".to_string()))
+                    } else {
+                        Ok::<u32, AppError>(99)
+                    }
+                }
+            },
+        )
+        .await;
+
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), 99);
+        assert_eq!(
+            call_count.load(std::sync::atomic::Ordering::SeqCst),
+            3,
+            "expected 3 total attempts"
+        );
+    }
+
+    /// With max_retries=0, only one attempt is made (no retries).
+    #[tokio::test]
+    async fn retry_zero_max_retries_makes_single_attempt() {
+        let call_count = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let cc = call_count.clone();
+
+        let result = retry_with_backoff(
+            "test-op",
+            0,
+            Duration::from_millis(1),
+            Duration::from_secs(60),
+            || {
+                let cc = cc.clone();
+                async move {
+                    cc.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    Err::<u32, AppError>(AppError::Other("fail".to_string()))
+                }
+            },
+        )
+        .await;
+
+        assert!(result.is_err());
+        assert_eq!(
+            call_count.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "expected exactly one attempt when max_retries=0"
         );
     }
 }

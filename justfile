@@ -32,3 +32,7 @@ install:
 # Run cargo fmt
 fmt:
     cargo fmt
+
+# Create a shareable link for an episode
+share episode_id:
+    cargo run -- share {{episode_id}}
