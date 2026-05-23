@@ -136,7 +136,7 @@ impl SyncEngine {
                 let byte_count = bytes_for_check.len() as u64;
                 let bar = reporter.add_file_bar(&relative_path_str, byte_count);
                 self.r2
-                    .put_object(&r2_key, bytes_for_check)
+                    .put_object(&r2_key, bytes_for_check, |pos| bar.update(pos))
                     .await
                     .map_err(|e| match e {
                         AppError::UploadFailed { source, .. } => AppError::UploadFailed {
@@ -145,7 +145,6 @@ impl SyncEngine {
                         },
                         other => other,
                     })?;
-                bar.update(byte_count);
                 bar.finish(&relative_path_str, byte_count);
                 files_uploaded += 1;
                 total_bytes += byte_count;
@@ -162,7 +161,7 @@ impl SyncEngine {
             let bar = reporter.add_file_bar(&relative_path_str, byte_count);
 
             self.r2
-                .put_object(&r2_key, bytes)
+                .put_object(&r2_key, bytes, |pos| bar.update(pos))
                 .await
                 .map_err(|e| match e {
                     AppError::UploadFailed { source, .. } => AppError::UploadFailed {
@@ -172,7 +171,6 @@ impl SyncEngine {
                     other => other,
                 })?;
 
-            bar.update(byte_count);
             bar.finish(&relative_path_str, byte_count);
 
             files_uploaded += 1;

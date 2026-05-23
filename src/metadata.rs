@@ -81,7 +81,7 @@ impl MetadataManager {
         })?;
 
         self.r2
-            .put_object(crate::r2::R2Client::METADATA_KEY, bytes)
+            .put_object(crate::r2::R2Client::METADATA_KEY, bytes, |_| {})
             .await
             .map_err(|e| crate::error::AppError::R2Error(e.to_string()))?;
 

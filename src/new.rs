@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use symphonia::core::formats::FormatOptions;
@@ -172,6 +172,34 @@ fn discover_audio_files(dir: &Path) -> Result<Vec<(String, f64)>, AppError> {
     Ok(files)
 }
 
+/// Compute the relative path from `from_dir` to `to_file`.
+///
+/// Strips common prefix components, then prepends `..` for each remaining
+/// component in `from_dir`.  Returns `to_file` unchanged when the paths share
+/// no common prefix (e.g. different roots).
+fn path_relative_to(from_dir: &Path, to_file: &Path) -> PathBuf {
+    let mut from_parts: Vec<_> = from_dir.components().collect();
+    let mut to_parts: Vec<_> = to_file.components().collect();
+
+    while !from_parts.is_empty() && !to_parts.is_empty() && from_parts[0] == to_parts[0] {
+        from_parts.remove(0);
+        to_parts.remove(0);
+    }
+
+    let mut result = PathBuf::new();
+    for _ in &from_parts {
+        result.push("..");
+    }
+    for part in &to_parts {
+        result.push(part);
+    }
+    if result.as_os_str().is_empty() {
+        to_file.to_path_buf()
+    } else {
+        result
+    }
+}
+
 /// Format a duration in seconds as mm:ss.d for display.
 fn fmt_duration(secs: f64) -> String {
     let total = secs as u64;
@@ -334,7 +362,10 @@ pub async fn run_new(
     }
     let mic_start = (intro_length - MIC_TRACK_LEAD_IN_SECS).max(0.0);
 
-    // Rewrite intro/outro FILE paths to absolute paths.
+    // Rewrite intro/outro FILE paths to paths relative to the episode directory.
+    // Reaper resolves FILE "..." paths relative to the .rpp file's directory, so
+    // relative paths work on any collaborator's machine regardless of their
+    // local working_dir prefix.
     // Priority: explicit config.new.intro_file / outro_file → fallback to working_dir/Media/.
     let media_dir = config.local.working_dir.join("Media");
     let intro_abs = config
@@ -347,13 +378,16 @@ pub async fn run_new(
         .as_ref()
         .and_then(|n| n.outro_file.clone())
         .unwrap_or_else(|| media_dir.join("outro-only.wav"));
-    let intro_abs_str = intro_abs.to_string_lossy().into_owned();
-    let outro_abs_str = outro_abs.to_string_lossy().into_owned();
+    let intro_rel_str = path_relative_to(&local_dir, &intro_abs)
+        .to_string_lossy()
+        .into_owned();
+    let outro_rel_str = path_relative_to(&local_dir, &outro_abs)
+        .to_string_lossy()
+        .into_owned();
 
-    // actuall rpp project is loaded as a string here.
     let mut rpp = template_str.clone();
-    rpp = project::set_source_file(&rpp, "intro-only", &intro_abs_str);
-    rpp = project::set_source_file(&rpp, "outro-only", &outro_abs_str);
+    rpp = project::set_source_file(&rpp, "intro-only", &intro_rel_str);
+    rpp = project::set_source_file(&rpp, "outro-only", &outro_rel_str);
     let mut plain_tracks = Vec::new();
 
     for (filename, duration) in &audio_files {
@@ -639,6 +673,67 @@ mod tests {
         assert!(
             (project_end - 3610.5).abs() < 1e-9,
             "project_end should be max_duration - trim"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // path_relative_to
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn path_relative_to_sibling_dir() {
+        let from = PathBuf::from("/Users/alice/podcast/ep96");
+        let to = PathBuf::from("/Users/alice/podcast/Media/intro-only.wav");
+        let rel = path_relative_to(&from, &to);
+        assert_eq!(rel, PathBuf::from("../Media/intro-only.wav"));
+    }
+
+    #[test]
+    fn path_relative_to_nested_target() {
+        let from = PathBuf::from("/Users/alice/podcast/ep96");
+        let to = PathBuf::from("/Users/alice/podcast/Media/sub/outro.wav");
+        let rel = path_relative_to(&from, &to);
+        assert_eq!(rel, PathBuf::from("../Media/sub/outro.wav"));
+    }
+
+    #[test]
+    fn path_relative_to_deeply_nested_from() {
+        let from = PathBuf::from("/a/b/c/d");
+        let to = PathBuf::from("/a/b/e/f.wav");
+        let rel = path_relative_to(&from, &to);
+        assert_eq!(rel, PathBuf::from("../../e/f.wav"));
+    }
+
+    #[test]
+    fn path_relative_to_different_root_climbs_out() {
+        // from = /home/alice/podcast/ep96 (4 non-root components)
+        // to   = /Volumes/External/intro.wav
+        // Common prefix is just the root '/'; must emit 4 '..' to climb out.
+        let from = PathBuf::from("/home/alice/podcast/ep96");
+        let to = PathBuf::from("/Volumes/External/intro.wav");
+        let rel = path_relative_to(&from, &to);
+        assert_eq!(rel, PathBuf::from("../../../../Volumes/External/intro.wav"));
+    }
+
+    #[test]
+    fn intro_outro_relative_path_is_not_absolute() {
+        let working_dir = PathBuf::from("/Users/alice/podcast");
+        let episode_dir = working_dir.join("ep96-database-history");
+        let intro_abs = working_dir.join("Media").join("intro-only.wav");
+        let outro_abs = working_dir.join("Media").join("outro-only.wav");
+
+        let intro_rel = path_relative_to(&episode_dir, &intro_abs);
+        let outro_rel = path_relative_to(&episode_dir, &outro_abs);
+
+        assert_eq!(intro_rel, PathBuf::from("../Media/intro-only.wav"));
+        assert_eq!(outro_rel, PathBuf::from("../Media/outro-only.wav"));
+        assert!(
+            !intro_rel.is_absolute(),
+            "intro relative path must not be absolute"
+        );
+        assert!(
+            !outro_rel.is_absolute(),
+            "outro relative path must not be absolute"
         );
     }
 }

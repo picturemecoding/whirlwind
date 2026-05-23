@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 
 use crate::sync::format_bytes;
@@ -47,6 +49,11 @@ impl ProgressReporter {
             filename.to_string()
         };
         pb.set_message(msg);
+
+        // Tick the spinner independently of I/O so the user can see activity
+        // while the transfer is in flight (progress bar position is updated
+        // only after each whole-file transfer completes).
+        pb.enable_steady_tick(Duration::from_millis(100));
 
         FileProgressBar { bar: pb }
     }
