@@ -759,7 +759,7 @@ async fn run_share(episode: &str, days: Option<u8>, r2: &R2Client) -> Result<(),
     }
 
     // Sort by last_modified descending; take the most recent.
-    mix_files.sort_by(|a, b| b.last_modified.cmp(&a.last_modified));
+    mix_files.sort_by_key(|b| std::cmp::Reverse(b.last_modified));
     let most_recent = mix_files[0];
 
     // Reconstruct the full key (list_objects strips the prefix).

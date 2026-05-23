@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 
 use crate::sync::format_bytes;
@@ -48,6 +50,10 @@ impl ProgressReporter {
         };
         pb.set_message(msg);
 
+        // Tick the spinner independently of I/O so the user can see activity
+        // while the transfer is in flight.
+        pb.enable_steady_tick(Duration::from_millis(100));
+
         FileProgressBar { bar: pb }
     }
 }
@@ -65,9 +71,7 @@ impl Default for ProgressReporter {
 impl FileProgressBar {
     /// Advance the bar to `bytes_transferred`.
     ///
-    /// For Phase 1 (whole-file in-memory transfers) this is called once with
-    /// the full file size after the transfer completes. Phase 2 can call it
-    /// incrementally if streaming is added.
+    /// Called after each uploaded chunk so the bar reflects incremental progress.
     pub fn update(&self, bytes_transferred: u64) {
         self.bar.set_position(bytes_transferred);
     }

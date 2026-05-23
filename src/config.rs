@@ -36,8 +36,20 @@ pub struct NewConfig {
 pub struct TransferConfig {
     #[serde(default = "TransferConfig::default_retry_count")]
     pub retry_count: u32,
+    /// Per-operation timeout in seconds. For multipart uploads this applies
+    /// per part, not to the whole file.
     #[serde(default = "TransferConfig::default_timeout_secs")]
     pub timeout_secs: u64,
+    /// Files at or above this size (in MiB) are uploaded via multipart.
+    /// Minimum 1 MiB. Default: 5 MiB.
+    #[serde(default = "TransferConfig::default_multipart_threshold_mb")]
+    pub multipart_threshold_mb: u64,
+    /// Size of each multipart part in MiB. Must be ≥ 5 MiB (R2/S3 requirement
+    /// for non-final parts). Smaller values give finer retry granularity and
+    /// more frequent progress updates; larger values reduce request overhead.
+    /// Default: 16 MiB.
+    #[serde(default = "TransferConfig::default_multipart_chunk_mb")]
+    pub multipart_chunk_mb: u64,
 }
 
 impl TransferConfig {
@@ -48,6 +60,14 @@ impl TransferConfig {
     fn default_timeout_secs() -> u64 {
         60
     }
+
+    fn default_multipart_threshold_mb() -> u64 {
+        30
+    }
+
+    fn default_multipart_chunk_mb() -> u64 {
+        16
+    }
 }
 
 impl Default for TransferConfig {
@@ -55,6 +75,8 @@ impl Default for TransferConfig {
         Self {
             retry_count: Self::default_retry_count(),
             timeout_secs: Self::default_timeout_secs(),
+            multipart_threshold_mb: Self::default_multipart_threshold_mb(),
+            multipart_chunk_mb: Self::default_multipart_chunk_mb(),
         }
     }
 }
@@ -204,6 +226,17 @@ impl Config {
         if self.identity.machine.is_empty() {
             return Err(AppError::ConfigInvalid(
                 "identity.machine is empty".to_string(),
+            ));
+        }
+        if self.transfer.multipart_chunk_mb < crate::r2::MIN_MULTIPART_CHUNK_MB {
+            return Err(AppError::ConfigInvalid(
+                "transfer.multipart_chunk_mb must be at least 5 (R2/S3 minimum part size)"
+                    .to_string(),
+            ));
+        }
+        if self.transfer.multipart_threshold_mb < 1 {
+            return Err(AppError::ConfigInvalid(
+                "transfer.multipart_threshold_mb must be at least 1".to_string(),
             ));
         }
         Ok(())

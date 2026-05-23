@@ -2,11 +2,12 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 
+use futures::stream::{self, StreamExt};
 use walkdir::WalkDir;
 
 use crate::error::AppError;
 use crate::progress::ProgressReporter;
-use crate::r2::compute_md5_hex as md5_hex;
+use crate::r2::compute_file_md5_hex;
 
 // ---------------------------------------------------------------------------
 // Summary types
@@ -23,6 +24,8 @@ pub struct PullSummary {
     pub files_skipped: usize,
     pub total_bytes: u64,
 }
+
+const UPLOAD_CONCURRENCY: usize = 4;
 
 // ---------------------------------------------------------------------------
 // SyncEngine
@@ -44,12 +47,15 @@ impl SyncEngine {
     /// when present (reliable for both single-part and multipart uploads),
     /// falling back to the raw ETag for single-part objects.
     ///
+    /// Files are uploaded concurrently up to `UPLOAD_CONCURRENCY` at a time.
+    /// Large files stream from disk one chunk at a time — the whole file is
+    /// never loaded into memory.
+    ///
     /// Does NOT delete any R2 objects — see TDD section 7 "Deletion Semantics".
     pub async fn push(&self, project: &str, local_dir: &Path) -> Result<PushSummary, AppError> {
-        // Fetch all remote objects in one request and index by full R2 key.
-        // This avoids N sequential head_object calls in the loop below.
-        // Single-part objects can use the ETag from list directly; multipart
-        // objects (ETag contains '-') still need head_object to get content_md5.
+        // Phase 1: list remote objects and walk local files to decide what needs
+        // uploading.  This phase is serial; the heavy work (parallel uploads)
+        // happens in Phase 2.
         let prefix = crate::r2::R2Client::project_prefix(project);
         let remote_index: HashMap<String, crate::r2::R2Object> = self
             .r2
@@ -59,10 +65,9 @@ impl SyncEngine {
             .map(|obj| (format!("{}{}", prefix, obj.key), obj))
             .collect();
 
-        let reporter = ProgressReporter::new();
-        let mut files_uploaded: usize = 0;
+        // (r2_key, local_abs_path, byte_count, display_name)
+        let mut to_upload: Vec<(String, std::path::PathBuf, u64, String)> = Vec::new();
         let mut files_skipped: usize = 0;
-        let mut total_bytes: u64 = 0;
 
         for entry_result in WalkDir::new(local_dir) {
             let entry = match entry_result {
@@ -84,7 +89,6 @@ impl SyncEngine {
 
             let abs_path = entry.path();
 
-            // Compute the relative path from local_dir.
             let relative_path =
                 abs_path
                     .strip_prefix(local_dir)
@@ -96,7 +100,6 @@ impl SyncEngine {
                         ),
                     })?;
 
-            // Use forward slashes on all platforms.
             let relative_path_str = relative_path
                 .components()
                 .map(|c| c.as_os_str().to_string_lossy().into_owned())
@@ -105,10 +108,6 @@ impl SyncEngine {
 
             let r2_key = format!("{}{}", prefix, relative_path_str);
 
-            // Resolve remote metadata for skip comparison:
-            // - Not in list  → None (new file, upload unconditionally)
-            // - Single-part  → construct R2ObjectMeta from list data (no HEAD needed)
-            // - Multipart ETag (contains '-') → head_object to get content_md5
             let r2_meta: Option<crate::r2::R2ObjectMeta> = match remote_index.get(&r2_key) {
                 None => None,
                 Some(obj) if obj.etag.contains('-') => {
@@ -122,61 +121,68 @@ impl SyncEngine {
             };
 
             if let Some(ref meta) = r2_meta {
-                // Object exists in R2 — read the local file to compare digests.
-                let bytes_for_check = std::fs::read(abs_path).map_err(|e| AppError::IoError {
-                    path: relative_path_str.clone(),
-                    source: e,
-                })?;
-                let local_md5 = md5_hex(&bytes_for_check);
+                // Stream the file to compute its MD5 without loading it fully.
+                let local_md5 =
+                    compute_local_etag(abs_path)
+                        .await
+                        .map_err(|e| AppError::IoError {
+                            path: relative_path_str.clone(),
+                            source: e,
+                        })?;
                 if etags_match(&local_md5, meta) {
                     files_skipped += 1;
                     continue;
                 }
-                // Not a match — upload using the bytes we already read.
-                let byte_count = bytes_for_check.len() as u64;
-                let bar = reporter.add_file_bar(&relative_path_str, byte_count);
-                self.r2
-                    .put_object(&r2_key, bytes_for_check)
-                    .await
-                    .map_err(|e| match e {
-                        AppError::UploadFailed { source, .. } => AppError::UploadFailed {
-                            path: relative_path_str.clone(),
-                            source,
-                        },
-                        other => other,
-                    })?;
-                bar.update(byte_count);
-                bar.finish(&relative_path_str, byte_count);
-                files_uploaded += 1;
-                total_bytes += byte_count;
-                continue;
             }
 
-            // Object does not exist in R2 — read the file now and upload.
-            let bytes = std::fs::read(abs_path).map_err(|e| AppError::IoError {
-                path: relative_path_str.clone(),
-                source: e,
-            })?;
+            let byte_count = abs_path
+                .metadata()
+                .map_err(|e| AppError::IoError {
+                    path: relative_path_str.clone(),
+                    source: e,
+                })?
+                .len();
 
-            let byte_count = bytes.len() as u64;
-            let bar = reporter.add_file_bar(&relative_path_str, byte_count);
+            to_upload.push((
+                r2_key,
+                abs_path.to_path_buf(),
+                byte_count,
+                relative_path_str,
+            ));
+        }
 
-            self.r2
-                .put_object(&r2_key, bytes)
-                .await
-                .map_err(|e| match e {
-                    AppError::UploadFailed { source, .. } => AppError::UploadFailed {
-                        path: relative_path_str.clone(),
-                        source,
-                    },
-                    other => other,
-                })?;
+        // Phase 2: upload collected files concurrently.
+        let reporter = Arc::new(ProgressReporter::new());
+        let r2 = Arc::clone(&self.r2);
 
-            bar.update(byte_count);
-            bar.finish(&relative_path_str, byte_count);
+        let upload_results: Vec<Result<u64, AppError>> = stream::iter(to_upload)
+            .map(|(r2_key, path, byte_count, display_name)| {
+                let r2 = Arc::clone(&r2);
+                let reporter = Arc::clone(&reporter);
+                async move {
+                    let bar = reporter.add_file_bar(&display_name, byte_count);
+                    r2.put_object_file(&r2_key, &path, |pos| bar.update(pos))
+                        .await
+                        .map_err(|e| match e {
+                            AppError::UploadFailed { source, .. } => AppError::UploadFailed {
+                                path: display_name.clone(),
+                                source,
+                            },
+                            other => other,
+                        })?;
+                    bar.finish(&display_name, byte_count);
+                    Ok::<u64, AppError>(byte_count)
+                }
+            })
+            .buffer_unordered(UPLOAD_CONCURRENCY)
+            .collect()
+            .await;
 
+        let mut files_uploaded: usize = 0;
+        let mut total_bytes: u64 = 0;
+        for result in upload_results {
+            total_bytes += result?;
             files_uploaded += 1;
-            total_bytes += byte_count;
         }
 
         println!(
@@ -231,7 +237,7 @@ impl SyncEngine {
 
             // Skip unchanged files: if local copy exists and MD5 matches.
             if local_path.exists()
-                && let Ok(local_md5) = compute_local_etag(&local_path)
+                && let Ok(local_md5) = compute_local_etag(&local_path).await
             {
                 let meta = crate::r2::R2ObjectMeta {
                     etag: obj.etag.clone(),
@@ -314,9 +320,9 @@ fn is_safe_r2_key(key: &str) -> bool {
         .all(|c| c != std::path::Component::ParentDir)
 }
 
-/// Compute the MD5 hex digest of a local file.
-fn compute_local_etag(path: &Path) -> Result<String, std::io::Error> {
-    Ok(md5_hex(&std::fs::read(path)?))
+/// Compute the MD5 hex digest of a local file without loading it fully.
+async fn compute_local_etag(path: &Path) -> Result<String, std::io::Error> {
+    compute_file_md5_hex(path).await
 }
 
 /// Compare a local MD5 hex digest against R2 object metadata.
@@ -411,15 +417,15 @@ mod tests {
         assert_eq!(s.total_bytes, 2048);
     }
 
-    #[test]
-    fn compute_local_etag_known_value() {
+    #[tokio::test]
+    async fn compute_local_etag_known_value() {
         // MD5("hello\n") — write a known file and check the digest.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("test.txt");
         std::fs::write(&path, b"hello").unwrap();
         // MD5("hello") == 5d41402abc4b2a76b9719d911017c592
         assert_eq!(
-            compute_local_etag(&path).unwrap(),
+            compute_local_etag(&path).await.unwrap(),
             "5d41402abc4b2a76b9719d911017c592"
         );
     }

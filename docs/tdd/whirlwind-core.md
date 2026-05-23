@@ -225,9 +225,21 @@ binary_path = "/Applications/REAPER.app/Contents/MacOS/REAPER"
 [identity]
 user = "alice"                         # short name used in lock files and metadata
 machine = "alice-macbook"              # hostname used in lock files
+
+# [transfer] is optional — all fields have defaults shown below
+[transfer]
+timeout_secs = 60             # per-operation timeout; for multipart uploads this
+                              # applies per part, not to the whole file
+retry_count = 3               # retries on transient failures (exponential backoff)
+multipart_threshold_mb = 30   # files at or above this size (MiB) use multipart
+                              # upload instead of a single PUT
+multipart_chunk_mb = 16       # size of each multipart part in MiB; must be ≥ 5
+                              # (R2/S3 minimum for non-final parts)
 ```
 
-All four sections (`[r2]`, `[local]`, `[reaper]`, `[identity]`) are required. `whirlwind init` writes this file interactively and tests the R2 connection before saving. The `[reaper]` section is required in config but the `reaper binary_path` value is only accessed by the `session` command — other commands do not validate that the path exists.
+All four sections (`[r2]`, `[local]`, `[reaper]`, `[identity]`) are required. `whirlwind init` writes this file interactively and tests the R2 connection before saving. The `[reaper]` section is required in config but the `reaper binary_path` value is only accessed by the `session` command — other commands do not validate that the path exists. The `[transfer]` section is optional and can be omitted entirely.
+
+`Config::validate()` enforces `multipart_chunk_mb ≥ 5` at startup and returns a clear error if the constraint is violated.
 
 The Rust type is:
 
@@ -237,6 +249,12 @@ Config {
     local: LocalConfig { working_dir: PathBuf },
     reaper: ReaperConfig { binary_path: PathBuf },
     identity: IdentityConfig { user: String, machine: String },
+    transfer: TransferConfig {
+        timeout_secs: u64,           // default 60
+        retry_count: u32,            // default 3
+        multipart_threshold_mb: u64, // default 30
+        multipart_chunk_mb: u64,     // default 16
+    },
 }
 ```
 
@@ -893,18 +911,15 @@ A future enhancement could intercept SIGINT to ask "Push current changes before 
 
 ### Risk 2: Large File Upload — Multipart Threshold
 
-**Risk**: `aws-sdk-s3` automatically uses multipart upload for objects above a threshold (default: 8 MB in the Rust SDK). Multipart uploads produce ETags in the format `"<md5_of_part_etags>-<N>"`, not the simple MD5 of the file. This means ETag-based skip logic will not work for large audio files after their first upload.
+**Status: RESOLVED.**
 
-**Impact**: Phase 3 ETag skip optimization breaks for files larger than the multipart threshold. Every push would re-upload large audio files, negating the primary performance benefit.
+`whirlwind` implements its own multipart upload path in `r2.rs` (`put_object_multipart`) rather than relying on the SDK's automatic threshold. Files at or above `transfer.multipart_threshold_mb` (default 30 MiB) are split into `transfer.multipart_chunk_mb` parts (default 16 MiB) and uploaded sequentially via `CreateMultipartUpload` / `UploadPart` / `CompleteMultipartUpload`.
 
-**Mitigation options**:
-1. Set multipart threshold to a value larger than any expected file (e.g., 5 GB). Not recommended — loses multipart benefits for very large files.
-2. Store a separate content hash alongside the R2 object as custom metadata (`x-amz-meta-content-md5`). On upload, attach the MD5 as user metadata. On ETag comparison, check user metadata first; fall back to ETag.
-3. Accept the limitation: multipart ETag mismatches → always re-upload. Document this.
+The ETag mismatch problem is avoided by attaching an `x-amz-meta-content-md5` custom metadata header on every upload — both single-part and multipart. Skip comparison in `sync.rs` (`etags_match`) checks this metadata field first, falling back to the raw ETag only for single-part objects where they are equivalent. Multipart-uploaded objects without this metadata are always re-uploaded (conservative fallback).
 
-**Recommended approach**: Option 2. Set `x-amz-meta-content-md5` on every `put_object` call. On `head_object` / `list_objects` responses, check for this metadata key first; use it for comparison if present. This is backward-compatible (files without the metadata key fall back to ETag comparison or unconditional upload).
+Retry behaviour: each part is independently retried via `retry_with_backoff`. If a part fails permanently, `abort_multipart_upload` is called to free the partial upload from R2 storage. Permanent client errors (HTTP 4xx except 408 and 429) are not retried.
 
-**This is a Phase 3 decision** — ETag skip is a Phase 3 feature. Phase 1 and 2 upload unconditionally.
+Both the threshold and chunk size are configurable via `[transfer]` in `config.toml`; see the schema above.
 
 ### Risk 3: `.rpp` Files with Absolute Paths
 

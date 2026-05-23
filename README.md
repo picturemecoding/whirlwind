@@ -120,6 +120,31 @@ pattern = "*_mike_*.wav"
 
 `[[new.tracks]]` patterns are matched in order — the first match wins. Use `--assign` to override per-run when a filename doesn't match your usual patterns.
 
+## Transfer Tuning
+
+An optional `[transfer]` section controls network behaviour. All fields have sensible defaults and the section can be omitted entirely.
+
+```toml
+[transfer]
+timeout_secs = 60             # per-operation timeout in seconds
+                              # for multipart uploads this applies per part,
+                              # not to the whole file — increase on slow networks
+retry_count = 3               # how many times to retry a transient failure
+multipart_threshold_mb = 30   # files at or above this size (MiB) use
+                              # multipart upload instead of a single PUT
+multipart_chunk_mb = 16       # size of each multipart part (MiB)
+                              # must be ≥ 5 (R2/S3 minimum); smaller values
+                              # give more frequent progress updates and finer
+                              # retry granularity at the cost of more requests
+```
+
+**When to change these:**
+
+- **Slow or unreliable network** — raise `timeout_secs` (e.g. `300`) so individual parts don't time out mid-transfer.
+- **Very large episode files** — lower `multipart_threshold_mb` so more of your upload benefits from per-part retry and real progress reporting.
+- **Faster progress bar updates** — lower `multipart_chunk_mb` to `8` or `5` (minimum). Each completed part advances the bar by one chunk.
+- **Fewer round-trips on a fast connection** — raise `multipart_chunk_mb` to `32` or higher.
+
 ## Purpose
 
 - Keep Reaper project state aligned across collaborators.

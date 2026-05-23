@@ -159,29 +159,23 @@ fn test_outro_position_is_preserved_and_mic_position_is_offset() {
 }
 
 // ---------------------------------------------------------------------------
-// Bug 3 — Intro/outro FILE paths must be absolute (working_dir/Media/)
+// Bug 3 — Intro/outro FILE paths must be relative to the episode directory
 // ---------------------------------------------------------------------------
 
-/// Assert that `set_source_file` rewrites the intro-only FILE path to an
-/// absolute path rooted at `working_dir/Media/`.
+/// Assert that `set_source_file` rewrites the intro-only FILE path to whatever
+/// path string is passed to it (relative path in this case).
 ///
-/// NOTE: `set_source_file` does not exist yet in `src/project.rs`.
-/// Will fail to COMPILE until Bug 3 is implemented.
+/// `set_source_file` is a dumb string replacer — it writes exactly the path
+/// given.  The caller (`run_new`) is responsible for computing relative paths.
 #[test]
-fn test_intro_file_path_is_rewritten_to_absolute() {
-    let working_dir = PathBuf::from("/Users/alice/podcast");
-    let abs_intro = working_dir.join("Media").join("intro-only.wav");
-    let abs_intro_str = abs_intro.to_str().expect("valid UTF-8 path");
+fn test_intro_file_path_is_rewritten_to_relative() {
+    let rel_intro = "../Media/intro-only.wav";
 
-    let result = project::set_source_file(TEMPLATE, "intro-only", abs_intro_str);
+    let result = project::set_source_file(TEMPLATE, "intro-only", rel_intro);
 
     assert!(
-        result.contains(&format!("FILE \"{abs_intro_str}\"")),
-        "Absolute intro FILE path must appear in output:\n{result}"
-    );
-    assert!(
-        !result.contains(r#"FILE "../Media/intro-only.wav""#),
-        "Relative intro FILE path must be gone:\n{result}"
+        result.contains(&format!("FILE \"{rel_intro}\"")),
+        "Relative intro FILE path must appear in output:\n{result}"
     );
     // The intro item's FADEOUT must be unchanged.
     assert!(
@@ -195,25 +189,17 @@ fn test_intro_file_path_is_rewritten_to_absolute() {
     );
 }
 
-/// Assert that `set_source_file` rewrites the outro-only FILE path to an
-/// absolute path rooted at `working_dir/Media/`.
-///
-/// NOTE: `set_source_file` does not exist yet — will fail to compile until Bug 3 is fixed.
+/// Assert that `set_source_file` rewrites the outro-only FILE path to whatever
+/// path string is passed to it (relative path in this case).
 #[test]
-fn test_outro_file_path_is_rewritten_to_absolute() {
-    let working_dir = PathBuf::from("/Users/alice/podcast");
-    let abs_outro = working_dir.join("Media").join("outro-only.wav");
-    let abs_outro_str = abs_outro.to_str().expect("valid UTF-8 path");
+fn test_outro_file_path_is_rewritten_to_relative() {
+    let rel_outro = "../Media/outro-only.wav";
 
-    let result = project::set_source_file(TEMPLATE, "outro-only", abs_outro_str);
+    let result = project::set_source_file(TEMPLATE, "outro-only", rel_outro);
 
     assert!(
-        result.contains(&format!("FILE \"{abs_outro_str}\"")),
-        "Absolute outro FILE path must appear in output:\n{result}"
-    );
-    assert!(
-        !result.contains(r#"FILE "../Media/outro-only.wav""#),
-        "Relative outro FILE path must be gone:\n{result}"
+        result.contains(&format!("FILE \"{rel_outro}\"")),
+        "Relative outro FILE path must appear in output:\n{result}"
     );
     // The outro item's POSITION must be unchanged.
     assert!(
@@ -222,38 +208,54 @@ fn test_outro_file_path_is_rewritten_to_absolute() {
     );
 }
 
-/// Assert that the canonical `working_dir/Media/` path construction rule is correct.
+/// Assert that the relative path from the episode directory to the shared
+/// Media folder is `../Media/<file>`, and that this relative path is NOT
+/// machine-specific (i.e. it does not contain the absolute working_dir prefix).
 ///
-/// The parent of each rewritten FILE path must equal `working_dir.join("Media")`.
-/// This test does not call any unimplemented function — it validates the structural
-/// path rule that the implementation must produce.
+/// This documents the structural invariant that `run_new` relies on when
+/// writing intro/outro FILE paths into the generated .rpp.
 #[test]
-fn test_intro_outro_paths_use_working_dir_media_prefix() {
+fn test_intro_outro_paths_are_relative_to_episode_dir() {
     let working_dir = PathBuf::from("/Users/alice/podcast");
-    let expected_intro = working_dir.join("Media").join("intro-only.wav");
-    let expected_outro = working_dir.join("Media").join("outro-only.wav");
+    let episode_dir = working_dir.join("ep96-database-history");
 
-    // Both constructed paths must be absolute.
+    // The relative paths that run_new writes into the .rpp.
+    let intro_rel = "../Media/intro-only.wav";
+    let outro_rel = "../Media/outro-only.wav";
+
+    // These must NOT be absolute.
     assert!(
-        expected_intro.is_absolute(),
-        "intro path must be absolute: {expected_intro:?}"
+        !PathBuf::from(intro_rel).is_absolute(),
+        "intro path written into .rpp must be relative, not absolute"
     );
     assert!(
-        expected_outro.is_absolute(),
-        "outro path must be absolute: {expected_outro:?}"
+        !PathBuf::from(outro_rel).is_absolute(),
+        "outro path written into .rpp must be relative, not absolute"
     );
 
-    // Parent directory of both must equal working_dir/Media.
-    let media_dir = working_dir.join("Media");
-    assert_eq!(
-        expected_intro.parent().unwrap(),
-        media_dir,
-        "intro parent must equal working_dir/Media"
+    // Joining the relative path onto the episode dir must reach working_dir/Media/.
+    // We check the string contains the expected suffix since PathBuf::join does not
+    // normalise ".." components without a filesystem call.
+    let resolved_intro = episode_dir.join(intro_rel).to_string_lossy().into_owned();
+    let resolved_outro = episode_dir.join(outro_rel).to_string_lossy().into_owned();
+    assert!(
+        resolved_intro.contains("Media/intro-only.wav"),
+        "resolved intro path must contain Media/intro-only.wav: {resolved_intro}"
     );
-    assert_eq!(
-        expected_outro.parent().unwrap(),
-        media_dir,
-        "outro parent must equal working_dir/Media"
+    assert!(
+        resolved_outro.contains("Media/outro-only.wav"),
+        "resolved outro path must contain Media/outro-only.wav: {resolved_outro}"
+    );
+
+    // Most importantly: the path must not embed the machine-specific working_dir.
+    let working_dir_str = working_dir.to_string_lossy();
+    assert!(
+        !intro_rel.contains(working_dir_str.as_ref()),
+        "relative intro path must not embed the absolute working_dir prefix"
+    );
+    assert!(
+        !outro_rel.contains(working_dir_str.as_ref()),
+        "relative outro path must not embed the absolute working_dir prefix"
     );
 }
 
