@@ -1,4 +1,6 @@
 use std::future::Future;
+use std::io::Read;
+use std::path::Path;
 use std::time::Duration;
 
 use aws_config::BehaviorVersion;
@@ -12,6 +14,7 @@ use aws_sdk_s3::{
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
 use md5::{Digest, Md5};
+use tokio::io::AsyncReadExt;
 
 use crate::config::TransferConfig;
 use crate::error::AppError;
@@ -338,21 +341,33 @@ impl R2Client {
         let total_parts = body.chunks(chunk_size).count();
 
         // Step 1 — start the multipart upload and obtain an upload_id.
-        let create_resp = self
-            .client
-            .create_multipart_upload()
-            .bucket(&self.bucket)
-            .key(key)
-            .metadata("content-md5", &md5_hex)
-            .send()
-            .await
-            .map_err(|e| {
-                let status = e.raw_response().map(|r| r.status().as_u16());
-                AppError::UploadFailed {
-                    path: key.to_string(),
-                    source: Box::new(std::io::Error::other(format_sdk_error_msg(status, &e))),
-                }
-            })?;
+        let create_op = format!("{} create-multipart", op_name);
+        let create_resp = retry_with_backoff(
+            &create_op,
+            max_retries,
+            initial_delay,
+            timeout,
+            is_transient_error,
+            || async {
+                self.client
+                    .create_multipart_upload()
+                    .bucket(&self.bucket)
+                    .key(key)
+                    .metadata("content-md5", &md5_hex)
+                    .send()
+                    .await
+                    .map_err(|e| {
+                        let status = e.raw_response().map(|r| r.status().as_u16());
+                        AppError::UploadFailed {
+                            path: key.to_string(),
+                            source: Box::new(std::io::Error::other(format_sdk_error_msg(
+                                status, &e,
+                            ))),
+                        }
+                    })
+            },
+        )
+        .await?;
 
         let upload_id = create_resp
             .upload_id()
@@ -387,7 +402,6 @@ impl R2Client {
                         .body(ByteStream::from(chunk_owned.clone()))
                         .send()
                         .await
-                        .map(|r| r.e_tag().unwrap_or_default().to_string())
                         .map_err(|e| {
                             let status = e.raw_response().map(|r| r.status().as_u16());
                             AppError::UploadFailed {
@@ -396,6 +410,16 @@ impl R2Client {
                                     status, &e,
                                 ))),
                             }
+                        })
+                        .and_then(|r| {
+                            r.e_tag()
+                                .ok_or_else(|| AppError::UploadFailed {
+                                    path: key.to_string(),
+                                    source: Box::new(std::io::Error::other(
+                                        "upload_part response missing ETag",
+                                    )),
+                                })
+                                .map(|e| e.to_string())
                         })
                 },
             )
@@ -420,6 +444,217 @@ impl R2Client {
         }
 
         // Step 3 — assemble the parts into the final object.
+        let complete_result = self
+            .client
+            .complete_multipart_upload()
+            .bucket(&self.bucket)
+            .key(key)
+            .upload_id(&upload_id)
+            .multipart_upload(
+                CompletedMultipartUpload::builder()
+                    .set_parts(Some(completed_parts))
+                    .build(),
+            )
+            .send()
+            .await
+            .map(|_| ())
+            .map_err(|e| {
+                let status = e.raw_response().map(|r| r.status().as_u16());
+                AppError::UploadFailed {
+                    path: key.to_string(),
+                    source: Box::new(std::io::Error::other(format_sdk_error_msg(status, &e))),
+                }
+            });
+
+        if complete_result.is_err() {
+            let _ = self.abort_multipart_upload(key, &upload_id).await;
+        }
+
+        complete_result
+    }
+
+    /// Upload a local file to `key`, streaming it from disk rather than loading
+    /// it into memory first.
+    ///
+    /// Files smaller than `transfer.multipart_threshold_mb` are read in full and
+    /// sent as a single PUT (fast for small files).  Larger files are streamed
+    /// one chunk at a time through the S3 multipart API — only one chunk is ever
+    /// held in memory, regardless of how large the file is.
+    pub async fn put_object_file(
+        &self,
+        key: &str,
+        path: &Path,
+        on_progress: impl Fn(u64),
+    ) -> Result<(), AppError> {
+        let file_size = std::fs::metadata(path)
+            .map_err(|e| AppError::IoError {
+                path: path.display().to_string(),
+                source: e,
+            })?
+            .len();
+
+        let threshold = self.transfer.multipart_threshold_mb * 1024 * 1024;
+
+        if file_size < threshold {
+            let bytes = std::fs::read(path).map_err(|e| AppError::IoError {
+                path: path.display().to_string(),
+                source: e,
+            })?;
+            return self.put_object(key, bytes, on_progress).await;
+        }
+
+        let chunk_size = self.transfer.multipart_chunk_mb as usize * 1024 * 1024;
+        self.put_object_multipart_file(key, path, file_size, chunk_size, on_progress)
+            .await
+    }
+
+    /// Multipart upload of a file from disk, streaming one chunk at a time.
+    ///
+    /// Makes two sequential passes over the file: one to compute the full-file
+    /// MD5 (stored as `x-amz-meta-content-md5` for skip detection), then one
+    /// to stream chunks for upload.  Each chunk is retried independently on
+    /// transient failure; the upload is aborted on unrecoverable error.
+    async fn put_object_multipart_file(
+        &self,
+        key: &str,
+        path: &Path,
+        file_size: u64,
+        chunk_size: usize,
+        on_progress: impl Fn(u64),
+    ) -> Result<(), AppError> {
+        let md5_hex = compute_file_md5_hex(path)
+            .await
+            .map_err(|e| AppError::IoError {
+                path: path.display().to_string(),
+                source: e,
+            })?;
+
+        let op_name = key.rsplit('/').next().unwrap_or(key).to_string();
+        let max_retries = self.transfer.retry_count;
+        let initial_delay = Duration::from_secs(1);
+        let timeout = Duration::from_secs(self.transfer.timeout_secs);
+        let total_parts = (file_size as usize).div_ceil(chunk_size);
+
+        // Step 1 — initiate.
+        let create_op = format!("{} create-multipart", op_name);
+        let create_resp = retry_with_backoff(
+            &create_op,
+            max_retries,
+            initial_delay,
+            timeout,
+            is_transient_error,
+            || async {
+                self.client
+                    .create_multipart_upload()
+                    .bucket(&self.bucket)
+                    .key(key)
+                    .metadata("content-md5", &md5_hex)
+                    .send()
+                    .await
+                    .map_err(|e| {
+                        let status = e.raw_response().map(|r| r.status().as_u16());
+                        AppError::UploadFailed {
+                            path: key.to_string(),
+                            source: Box::new(std::io::Error::other(format_sdk_error_msg(
+                                status, &e,
+                            ))),
+                        }
+                    })
+            },
+        )
+        .await?;
+
+        let upload_id = create_resp
+            .upload_id()
+            .ok_or_else(|| AppError::UploadFailed {
+                path: key.to_string(),
+                source: Box::new(std::io::Error::other("R2 did not return an upload_id")),
+            })?
+            .to_string();
+
+        // Step 2 — stream and upload each chunk.
+        let mut completed_parts: Vec<CompletedPart> = Vec::with_capacity(total_parts);
+        let mut bytes_sent: u64 = 0;
+
+        let mut file = tokio::fs::File::open(path)
+            .await
+            .map_err(|e| AppError::IoError {
+                path: path.display().to_string(),
+                source: e,
+            })?;
+
+        for part_num in 1i32..=(total_parts as i32) {
+            let this_chunk_size = chunk_size.min((file_size - bytes_sent) as usize);
+            let mut chunk = vec![0u8; this_chunk_size];
+
+            if let Err(e) = file.read_exact(&mut chunk).await {
+                let _ = self.abort_multipart_upload(key, &upload_id).await;
+                return Err(AppError::IoError {
+                    path: path.display().to_string(),
+                    source: e,
+                });
+            }
+
+            let part_op = format!("{} part {}/{}", op_name, part_num, total_parts);
+
+            let etag_result = retry_with_backoff(
+                &part_op,
+                max_retries,
+                initial_delay,
+                timeout,
+                is_transient_error,
+                || async {
+                    self.client
+                        .upload_part()
+                        .bucket(&self.bucket)
+                        .key(key)
+                        .upload_id(&upload_id)
+                        .part_number(part_num)
+                        .body(ByteStream::from(chunk.clone()))
+                        .send()
+                        .await
+                        .map_err(|e| {
+                            let status = e.raw_response().map(|r| r.status().as_u16());
+                            AppError::UploadFailed {
+                                path: key.to_string(),
+                                source: Box::new(std::io::Error::other(format_sdk_error_msg(
+                                    status, &e,
+                                ))),
+                            }
+                        })
+                        .and_then(|r| {
+                            r.e_tag()
+                                .ok_or_else(|| AppError::UploadFailed {
+                                    path: key.to_string(),
+                                    source: Box::new(std::io::Error::other(
+                                        "upload_part response missing ETag",
+                                    )),
+                                })
+                                .map(|e| e.to_string())
+                        })
+                },
+            )
+            .await;
+
+            match etag_result {
+                Ok(etag) => {
+                    bytes_sent += this_chunk_size as u64;
+                    on_progress(bytes_sent);
+                    completed_parts.push(
+                        CompletedPart::builder()
+                            .e_tag(etag)
+                            .part_number(part_num)
+                            .build(),
+                    );
+                }
+                Err(e) => {
+                    let _ = self.abort_multipart_upload(key, &upload_id).await;
+                    return Err(e);
+                }
+            }
+        }
+
+        // Step 3 — complete.
         let complete_result = self
             .client
             .complete_multipart_upload()
@@ -722,7 +957,8 @@ fn is_transient_error(err: &AppError) -> bool {
             let msg = source.to_string();
             // Our formatted messages start with "HTTP NNN: ..." when a status is known.
             if let Some(rest) = msg.strip_prefix("HTTP ")
-                && let Ok(status) = rest[..rest.find(':').unwrap_or(3).min(3)].parse::<u16>()
+                && let Some((status_str, _)) = rest.split_once(':')
+                && let Ok(status) = status_str.trim().parse::<u16>()
             {
                 // 4xx are permanent except 408 (Request Timeout) and 429 (Rate Limited)
                 return !(400..500).contains(&status) || status == 408 || status == 429;
@@ -731,6 +967,36 @@ fn is_transient_error(err: &AppError) -> bool {
         }
         _ => true,
     }
+}
+
+/// Compute the MD5 hex digest of a file on disk without loading it into memory.
+///
+/// Runs in a `spawn_blocking` thread so the async executor is not stalled by
+/// the sequential disk read.
+pub(crate) async fn compute_file_md5_hex(path: &Path) -> Result<String, std::io::Error> {
+    let path = path.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        let file = std::fs::File::open(&path)?;
+        let mut reader = std::io::BufReader::new(file);
+        let mut hasher = Md5::new();
+        let mut buf = [0u8; 65536];
+        loop {
+            let n = reader.read(&mut buf)?;
+            if n == 0 {
+                break;
+            }
+            hasher.update(&buf[..n]);
+        }
+        Ok::<String, std::io::Error>(
+            hasher
+                .finalize()
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect(),
+        )
+    })
+    .await
+    .map_err(std::io::Error::other)?
 }
 
 /// Compute the MD5 hex digest of `data`.

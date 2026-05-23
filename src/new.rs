@@ -3,9 +3,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use symphonia::core::formats::FormatOptions;
+use symphonia::core::formats::probe::Hint;
 use symphonia::core::io::MediaSourceStream;
 use symphonia::core::meta::MetadataOptions;
-use symphonia::core::probe::Hint;
 
 use crate::{
     config::{Config, TrackConfig},
@@ -72,24 +72,22 @@ fn get_non_wav_duration(path: &Path) -> f64 {
     if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
         hint.with_extension(ext);
     }
-    let probed = match symphonia::default::get_probe().format(
+    let format = match symphonia::default::get_probe().probe(
         &hint,
         mss,
-        &FormatOptions::default(),
-        &MetadataOptions::default(),
+        FormatOptions::default(),
+        MetadataOptions::default(),
     ) {
-        Ok(p) => p,
+        Ok(f) => f,
         Err(_) => return 0.0,
     };
-    let format = probed.format;
     format
         .tracks()
         .iter()
         .filter_map(|t| {
-            let codec = &t.codec_params;
-            let tb = codec.time_base?;
-            let frames = codec.n_frames?;
-            Some(frames as f64 * tb.numer as f64 / tb.denom as f64)
+            let tb = t.time_base?;
+            let frames = t.num_frames?;
+            Some(frames as f64 * tb.numer.get() as f64 / tb.denom.get() as f64)
         })
         .fold(0.0_f64, f64::max)
 }
@@ -175,8 +173,8 @@ fn discover_audio_files(dir: &Path) -> Result<Vec<(String, f64)>, AppError> {
 /// Compute the relative path from `from_dir` to `to_file`.
 ///
 /// Strips common prefix components, then prepends `..` for each remaining
-/// component in `from_dir`.  Returns `to_file` unchanged when the paths share
-/// no common prefix (e.g. different roots).
+/// component in `from_dir`.  When the paths share no common prefix beyond the
+/// root, a fully `..`-qualified relative path is returned.
 fn path_relative_to(from_dir: &Path, to_file: &Path) -> PathBuf {
     let mut from_parts: Vec<_> = from_dir.components().collect();
     let mut to_parts: Vec<_> = to_file.components().collect();

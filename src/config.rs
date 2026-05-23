@@ -228,7 +228,7 @@ impl Config {
                 "identity.machine is empty".to_string(),
             ));
         }
-        if self.transfer.multipart_chunk_mb < 5 {
+        if self.transfer.multipart_chunk_mb < crate::r2::MIN_MULTIPART_CHUNK_MB {
             return Err(AppError::ConfigInvalid(
                 "transfer.multipart_chunk_mb must be at least 5 (R2/S3 minimum part size)"
                     .to_string(),

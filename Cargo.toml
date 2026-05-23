@@ -50,7 +50,7 @@ indicatif = "0.18.4"
 hound = "3"
 glob = "0.3"
 uuid = { version = "1", features = ["v4"] }
-symphonia = { version = "0.5", features = ["aiff", "mp3", "flac", "ogg"] }
+symphonia = { version = "0.6.0", features = ["aiff", "mp3", "flac", "ogg"] }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full", "test-util"] }
