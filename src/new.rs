@@ -378,6 +378,19 @@ pub async fn run_new(
         .as_ref()
         .and_then(|n| n.outro_file.clone())
         .unwrap_or_else(|| media_dir.join("outro-only.wav"));
+    if !intro_abs.exists() {
+        return Err(AppError::Other(format!(
+            "intro file not found: {}\n  Set intro_file in [new] config or place the file at the default location.",
+            intro_abs.display()
+        )));
+    }
+    if !outro_abs.exists() {
+        return Err(AppError::Other(format!(
+            "outro file not found: {}\n  Set outro_file in [new] config or place the file at the default location.",
+            outro_abs.display()
+        )));
+    }
+
     let intro_rel_str = path_relative_to(&local_dir, &intro_abs)
         .to_string_lossy()
         .into_owned();
