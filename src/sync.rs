@@ -234,17 +234,30 @@ impl SyncEngine {
                 continue;
             }
             let local_path = local_dir.join(&obj.key);
+            let full_key = format!("{}{}", prefix, obj.key);
 
             // Skip unchanged files: if local copy exists and MD5 matches.
-            if local_path.exists()
-                && let Ok(local_md5) = compute_local_etag(&local_path).await
-            {
+            // list_objects never includes content_md5 metadata, so for multipart
+            // objects (etag contains '-') we HEAD to retrieve it before comparing.
+            if local_path.exists() {
+                let content_md5 = if obj.etag.contains('-') {
+                    self.r2
+                        .head_object(&full_key)
+                        .await
+                        .ok()
+                        .flatten()
+                        .and_then(|m| m.content_md5)
+                } else {
+                    None
+                };
                 let meta = crate::r2::R2ObjectMeta {
                     etag: obj.etag.clone(),
                     size: obj.size,
-                    content_md5: obj.content_md5.clone(),
+                    content_md5,
                 };
-                if etags_match(&local_md5, &meta) {
+                if let Ok(local_md5) = compute_local_etag(&local_path).await
+                    && etags_match(&local_md5, &meta)
+                {
                     files_skipped += 1;
                     continue;
                 }
@@ -260,11 +273,9 @@ impl SyncEngine {
 
             let bar = reporter.add_file_bar(&obj.key, obj.size);
 
-            // Full R2 key = prefix + relative key.
-            let full_key = format!("{}{}", prefix, obj.key);
-            let bytes = self
+            let byte_count = self
                 .r2
-                .get_object_bytes(&full_key)
+                .get_object_file(&full_key, &local_path, |pos| bar.update(pos))
                 .await
                 .map_err(|e| match e {
                     AppError::DownloadFailed { source, .. } => AppError::DownloadFailed {
@@ -274,14 +285,6 @@ impl SyncEngine {
                     other => other,
                 })?;
 
-            let byte_count = bytes.len() as u64;
-
-            std::fs::write(&local_path, &bytes).map_err(|e| AppError::IoError {
-                path: local_path.display().to_string(),
-                source: e,
-            })?;
-
-            bar.update(byte_count);
             bar.finish(&obj.key, byte_count);
 
             files_downloaded += 1;
