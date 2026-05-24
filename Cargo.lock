@@ -1867,7 +1867,7 @@ dependencies = [
 
 [[package]]
 name = "pmc-whirlwind"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "aws-config",
  "aws-credential-types",

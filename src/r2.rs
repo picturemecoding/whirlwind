@@ -15,6 +15,7 @@ use bytes::Bytes;
 use chrono::{DateTime, Utc};
 use md5::{Digest, Md5};
 use tokio::io::AsyncReadExt;
+use tokio::io::AsyncWriteExt;
 
 use crate::config::TransferConfig;
 use crate::error::AppError;
@@ -254,6 +255,132 @@ impl R2Client {
             },
         )
         .await
+    }
+
+    /// Download an object and write it directly to `path` without loading the
+    /// entire body into memory.
+    ///
+    /// Writes to a `.tmp` sibling first; renames to `path` only on success so
+    /// a failed download never leaves a partial file at the target path.
+    ///
+    /// Calls `on_progress(bytes_written_so_far)` after each chunk.
+    /// Retries transient failures up to `config.transfer.retry_count` times.
+    pub async fn get_object_file(
+        &self,
+        key: &str,
+        path: &Path,
+        on_progress: impl Fn(u64),
+    ) -> Result<u64, AppError> {
+        let op_name = key.rsplit('/').next().unwrap_or(key).to_string();
+        let max_retries = self.transfer.retry_count;
+        let initial_delay = Duration::from_secs(1);
+        let timeout = Duration::from_secs(self.transfer.timeout_secs);
+
+        let mut temp_name = path.file_name().unwrap_or_default().to_os_string();
+        temp_name.push(".tmp");
+        let temp_path = path.with_file_name(temp_name);
+
+        let result = retry_with_backoff(
+            &op_name,
+            max_retries,
+            initial_delay,
+            timeout,
+            is_transient_error,
+            || async {
+                let get_result = self
+                    .client
+                    .get_object()
+                    .bucket(&self.bucket)
+                    .key(key)
+                    .send()
+                    .await;
+
+                let resp = match get_result {
+                    Ok(r) => r,
+                    Err(sdk_err) => {
+                        let http_status = sdk_err.raw_response().map(|r| r.status().as_u16());
+                        if matches!(http_status, Some(404)) {
+                            return Err(AppError::NotFound {
+                                key: key.to_string(),
+                            });
+                        }
+                        let debug = format!("{:?}", sdk_err);
+                        if debug.contains("NoSuchKey") {
+                            return Err(AppError::NotFound {
+                                key: key.to_string(),
+                            });
+                        }
+                        let msg = format_sdk_error_msg(http_status, &sdk_err);
+                        return Err(AppError::DownloadFailed {
+                            path: key.to_string(),
+                            source: Box::new(std::io::Error::other(msg)),
+                        });
+                    }
+                };
+
+                let mut file =
+                    tokio::fs::File::create(&temp_path)
+                        .await
+                        .map_err(|e| AppError::IoError {
+                            path: temp_path.display().to_string(),
+                            source: e,
+                        })?;
+
+                let mut stream = resp.body.into_async_read();
+                let mut buf = vec![0u8; 65536];
+                let mut bytes_written: u64 = 0;
+
+                loop {
+                    let n = stream
+                        .read(&mut buf)
+                        .await
+                        .map_err(|e| AppError::DownloadFailed {
+                            path: key.to_string(),
+                            source: Box::new(e),
+                        })?;
+                    if n == 0 {
+                        break;
+                    }
+                    file.write_all(&buf[..n])
+                        .await
+                        .map_err(|e| AppError::IoError {
+                            path: temp_path.display().to_string(),
+                            source: e,
+                        })?;
+                    bytes_written += n as u64;
+                    on_progress(bytes_written);
+                }
+
+                file.flush().await.map_err(|e| AppError::IoError {
+                    path: temp_path.display().to_string(),
+                    source: e,
+                })?;
+
+                Ok(bytes_written)
+            },
+        )
+        .await;
+
+        match result {
+            Ok(n) => {
+                // Remove destination first: tokio::fs::rename does not overwrite on Windows.
+                if path.exists() {
+                    let _ = tokio::fs::remove_file(path).await;
+                }
+                if let Err(e) = tokio::fs::rename(&temp_path, path).await {
+                    let _ = tokio::fs::remove_file(&temp_path).await;
+                    return Err(AppError::IoError {
+                        path: path.display().to_string(),
+                        source: e,
+                    });
+                }
+                Ok(n)
+            }
+            Err(e) => {
+                let _ = tokio::fs::remove_file(&temp_path).await;
+                Err(e)
+            }
+        }
     }
 
     /// Unconditional PUT — overwrite or create the object at `key`.
