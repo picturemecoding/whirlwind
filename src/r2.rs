@@ -363,12 +363,17 @@ impl R2Client {
 
         match result {
             Ok(n) => {
-                tokio::fs::rename(&temp_path, path)
-                    .await
-                    .map_err(|e| AppError::IoError {
+                // Remove destination first: tokio::fs::rename does not overwrite on Windows.
+                if path.exists() {
+                    let _ = tokio::fs::remove_file(path).await;
+                }
+                if let Err(e) = tokio::fs::rename(&temp_path, path).await {
+                    let _ = tokio::fs::remove_file(&temp_path).await;
+                    return Err(AppError::IoError {
                         path: path.display().to_string(),
                         source: e,
-                    })?;
+                    });
+                }
                 Ok(n)
             }
             Err(e) => {
